@@ -1,187 +1,177 @@
-// The wanted level: stars that rise with every crime and fall when the heat
-// dies down. Police cruisers spawn at the edge of the map and chase the
-// player; foot cops run the player down on foot. Get caught on foot and it is
-// BUSTED; get your car smashed up or your health to zero and it is WASTED.
-
+// Sunset Bay — the Sunset Bay PD. Cop cars spawn at the city edge when the
+// wanted level rises and chase the player; foot cops sprint after a player
+// on foot, and holding the player at close range ends the run (BUSTED).
 import * as THREE from 'three';
-import { CAR, ROADS, WANTED } from './config.js';
-import { resolveCircle } from './city.js';
+import { CFG, mulberry32, range } from './config.js';
+import { W, setDialog } from './world.js';
+import { makeCarMesh } from './vehicles.js';
+import { makePedMesh } from './traffic.js';
+import { resolveBlocked } from './city.js';
 
-function makeCopMesh() {
-  const group = new THREE.Group();
-  const body = new THREE.Mesh(
-    new THREE.BoxGeometry(0.6, 0.9, 0.38),
-    new THREE.MeshLambertMaterial({ color: 0x1c4fd7 }),
-  );
-  body.position.y = 0.9;
-  group.add(body);
-  const head = new THREE.Mesh(
-    new THREE.SphereGeometry(0.24, 8, 6),
-    new THREE.MeshLambertMaterial({ color: 0xd9a077 }),
-  );
-  head.position.y = 1.55;
-  group.add(head);
-  const cap = new THREE.Mesh(
-    new THREE.CylinderGeometry(0.26, 0.26, 0.1, 8),
-    new THREE.MeshLambertMaterial({ color: 0x10131a }),
-  );
-  cap.position.y = 1.74;
-  group.add(cap);
-  const legs = new THREE.Mesh(
-    new THREE.BoxGeometry(0.5, 0.45, 0.34),
-    new THREE.MeshLambertMaterial({ color: 0x10131a }),
-  );
-  legs.position.y = 0.22;
-  legs.name = 'legs';
-  group.add(legs);
-  return group;
+function playerTarget() {
+  return W.onFoot ? W.playerPos : W.car.pos;
 }
 
-export function createPolice(scene, S) {
-  let quietTimer = 0;
+export function spawnCopCar(scene, rng) {
+  const edge = [
+    { x: -CFG.cityHalf, z: range(rng, -180, 180) },
+    { x: CFG.cityHalf, z: range(rng, -180, 180) },
+    { x: range(rng, -180, 180), z: -CFG.cityHalf },
+    { x: range(rng, -180, 180), z: CFG.cityHalf },
+  ][Math.floor(rng() * 4)];
+  const mesh = makeCarMesh(0x1a1a22, true);
+  mesh.position.set(edge.x, 0, edge.z);
+  scene.add(mesh);
+  const cop = {
+    group: mesh, pos: { x: edge.x, z: edge.z }, yaw: 0, speed: 0,
+    sirenPhase: rng() * Math.PI,
+  };
+  W.cops.push(cop);
+  return cop;
+}
 
-  function addHeat(amount) {
-    if (S.screen !== 'play') return;
-    S.wanted = Math.min(WANTED.max, S.wanted + amount);
-    quietTimer = 0;
-    if (S.wanted >= 1) S.audio.siren(true);
-  }
+export function spawnFootCop(scene, rng) {
+  const t = playerTarget();
+  const a = range(rng, 0, Math.PI * 2);
+  const x = t.x + Math.cos(a) * 26;
+  const z = t.z + Math.sin(a) * 26;
+  const mesh = makePedMesh(mulberry32((rng() * 1e9) | 0));
+  // Navy uniform: recolor the torso.
+  mesh.children[1].material = new THREE.MeshLambertMaterial({ color: 0x1a2f5a });
+  mesh.position.set(x, 0, z);
+  scene.add(mesh);
+  const cop = { group: mesh, pos: { x, z }, yaw: 0, speed: 6.4 };
+  W.footCops.push(cop);
+  return cop;
+}
 
-  function spawnEdgePoint() {
-    const p = S.player;
-    const angle = S.rng() * Math.PI * 2;
-    return {
-      x: Math.max(-160, Math.min(160, p.pos.x + Math.cos(angle) * 90)),
-      z: Math.max(-160, Math.min(160, p.pos.z + Math.sin(angle) * 90)),
-    };
-  }
-
-  function spawnPoliceCar() {
-    const at = spawnEdgePoint();
-    const car = S.vehicles.spawnCar('police', at.x, at.z, 0, { driver: 'npc' });
-    car.speed = 10;
-    return car;
-  }
-
-  function spawnFootCop() {
-    const at = spawnEdgePoint();
-    const mesh = makeCopMesh();
-    mesh.position.set(at.x, 0, at.z);
-    scene.add(mesh);
-    const cop = { mesh, pos: mesh.position, heading: 0, grabTimer: 0, walkPhase: S.rng() * 6 };
-    S.cops.push(cop);
-    return cop;
-  }
-
-  function removeCop(cop) {
-    scene.remove(cop.mesh);
-    const i = S.cops.indexOf(cop);
-    if (i !== -1) S.cops.splice(i, 1);
-  }
-
-  function stepPoliceCar(car, dt) {
-    const p = S.player;
-    const target = p.car ? p.car.mesh.position : p.pos;
-    const dx = target.x - car.mesh.position.x;
-    const dz = target.z - car.mesh.position.z;
-    const dist = Math.hypot(dx, dz);
-    const wantHeading = Math.atan2(dx, dz);
-    let dh = wantHeading - car.heading;
-    while (dh > Math.PI) dh -= Math.PI * 2;
-    while (dh < -Math.PI) dh += Math.PI * 2;
-    const steer = Math.max(-1, Math.min(1, dh * 1.4));
-    const throttle = dist > 6 ? 1 : 0.4;
-    S.vehicles.drive(car, dt, throttle, steer);
-    // Ramming the player's car damages it; ramming the player on foot busts them.
-    if (dist < 3.4) {
-      if (p.car) {
-        p.car.health -= 18 * dt;
-        if (p.car.health <= 0) {
-          const wreck = p.car;
-          S.hud.showDialog('Your car is wrecked!', 2);
-          S.playerCtl.exitCar();
-          S.vehicles.removeCar(wreck);
-        }
-      } else if (p.onFoot) {
-        copGrab(dt, 0.9);
-      }
+function copCarStep(cop, dt) {
+  if (cop.staged) {
+    // Staged for a screenshot: hold lane and speed in formation instead of
+    // converging on the player, so cruisers read as a motorcade, not a pile.
+    cop.pos.x += Math.sin(cop.yaw) * cop.speed * dt;
+    cop.pos.z += Math.cos(cop.yaw) * cop.speed * dt;
+    cop.group.position.set(cop.pos.x, 0, cop.pos.z);
+    cop.group.rotation.y = cop.yaw;
+    cop.sirenPhase += dt * 7;
+    const bars = cop.group.userData.lightBar;
+    if (bars) {
+      const on = Math.sin(cop.sirenPhase) > 0;
+      bars[0].material.color.setHex(on ? 0xff2020 : 0x550000);
+      bars[1].material.color.setHex(on ? 0x2040ff : 0x000055);
     }
+    const spin = cop.speed * dt * 2.6;
+    for (const wheel of cop.group.userData.wheels) wheel.rotation.x += spin;
+    return;
   }
-
-  function copGrab(dt, rate) {
-    // Shared bust progress: any cop close by counts it up.
-    S.bustTimer = (S.bustTimer || 0) + dt * rate;
-    if (S.bustTimer > 1.4) {
-      S.bustTimer = 0;
-      S.endGame('busted');
-    }
+  const t = playerTarget();
+  const dx = t.x - cop.pos.x;
+  const dz = t.z - cop.pos.z;
+  const dist = Math.hypot(dx, dz);
+  const wantYaw = Math.atan2(dx, dz);
+  let dy = wantYaw - cop.yaw;
+  while (dy > Math.PI) dy -= Math.PI * 2;
+  while (dy < -Math.PI) dy += Math.PI * 2;
+  cop.yaw += Math.max(-2.4 * dt, Math.min(2.4 * dt, dy));
+  const targetSpeed = dist > 6 ? CFG.copChaseSpeed : 6;
+  cop.speed += Math.sign(targetSpeed - cop.speed) * Math.min(Math.abs(targetSpeed - cop.speed), 18 * dt);
+  cop.pos.x += Math.sin(cop.yaw) * cop.speed * dt;
+  cop.pos.z += Math.cos(cop.yaw) * cop.speed * dt;
+  cop.group.position.set(cop.pos.x, 0, cop.pos.z);
+  cop.group.rotation.y = cop.yaw;
+  // Flashing light bar.
+  cop.sirenPhase += dt * 7;
+  const bars = cop.group.userData.lightBar;
+  if (bars) {
+    const on = Math.sin(cop.sirenPhase) > 0;
+    bars[0].material.color.setHex(on ? 0xff2020 : 0x550000);
+    bars[1].material.color.setHex(on ? 0x2040ff : 0x000055);
   }
-
-  function stepFootCop(cop, dt) {
-    const p = S.player;
-    const dx = p.pos.x - cop.pos.x;
-    const dz = p.pos.z - cop.pos.z;
-    const dist = Math.hypot(dx, dz);
-    if (p.car) {
-      // The player drove off: the cop gives up and despawns far away.
-      if (dist > 70) removeCop(cop);
-      return;
-    }
-    const want = Math.atan2(dx, dz);
-    let dh = want - cop.heading;
-    while (dh > Math.PI) dh -= Math.PI * 2;
-    while (dh < -Math.PI) dh += Math.PI * 2;
-    cop.heading += Math.max(-3 * dt, Math.min(3 * dt, dh));
-    const speed = 6.4;
-    cop.pos.x += Math.sin(cop.heading) * speed * dt;
-    cop.pos.z += Math.cos(cop.heading) * speed * dt;
-    resolveCircle(S.city.colliders, cop.pos, 0.5);
-    cop.walkPhase += dt * speed * 2;
-    const legs = cop.mesh.getObjectByName('legs');
-    if (legs) legs.position.y = 0.22 + Math.abs(Math.sin(cop.walkPhase)) * 0.1;
-    cop.mesh.rotation.y = cop.heading;
-    if (dist < 1.8) copGrab(dt, 1);
-    else S.bustTimer = Math.max(0, (S.bustTimer || 0) - dt);
+  const spin = cop.speed * dt * 2.6;
+  for (const wheel of cop.group.userData.wheels) wheel.rotation.x += spin;
+  // Ramming the player's car hurts and slows it.
+  if (W.car && dist < 3.6) {
+    W.car.speed *= 0.86;
+    if (W.audio) W.audio.punch();
   }
+}
 
-  function update(dt) {
-    const wanted = Math.floor(S.wanted);
-    const policeCars = S.cars.filter((c) => c.kind === 'police');
-    const wantCars = wanted * WANTED.carsPerStar;
-    while (policeCars.length < wantCars && S.cars.length < 30) {
-      policeCars.push(spawnPoliceCar());
-    }
-    // Surplus cruisers cruise off and despawn.
-    for (const car of [...policeCars]) {
-      if (wanted === 0) {
-        S.vehicles.removeCar(car);
-        continue;
-      }
-      stepPoliceCar(car, dt);
-    }
-    const wantCops = S.player.car ? 0 : wanted * WANTED.footCopsPerStar;
-    while (S.cops.length < wantCops) spawnFootCop();
-    while (S.cops.length > wantCops) removeCop(S.cops[S.cops.length - 1]);
-    for (const cop of [...S.cops]) stepFootCop(cop, dt);
+function footCopStep(cop, dt) {
+  const t = playerTarget();
+  const dx = t.x - cop.pos.x;
+  const dz = t.z - cop.pos.z;
+  const dist = Math.hypot(dx, dz);
+  cop.yaw = Math.atan2(dx, dz);
+  const speed = cop.speed * (dist > 30 ? 1.15 : 1);
+  cop.pos.x += (dx / Math.max(dist, 0.01)) * speed * dt;
+  cop.pos.z += (dz / Math.max(dist, 0.01)) * speed * dt;
+  cop.group.position.set(cop.pos.x, 0, cop.pos.z);
+  cop.group.rotation.y = cop.yaw;
+  cop.group.position.y = Math.abs(Math.sin(W.time * 10)) * 0.08;
+  // Close and on foot: the busted clock ticks.
+  if (W.onFoot && dist < 2.6) {
+    W.heldByCop += dt;
+    if (W.heldByCop > 2.2) bustPlayer();
+  }
+}
 
-    // Wanted decay: quiet for a while, far from any cop, and a star fades.
+export function bustPlayer() {
+  if (W.mode !== 'play') return;
+  W.mode = 'busted';
+  W.heldByCop = 0;
+  W.wanted = 0;
+  setDialog('The Sunset Bay PD has you. The run ends here — for now.', 999);
+  if (W.audio) {
+    W.audio.bustedSting();
+    W.audio.setSiren(false);
+    W.audio.setEngine(0, false);
+  }
+}
+
+export function wastePlayer() {
+  if (W.mode !== 'play') return;
+  W.mode = 'wasted';
+  W.wanted = 0;
+  setDialog('Sunset Bay chewed you up. Get patched up and come back swinging.', 999);
+  if (W.audio) {
+    W.audio.bustedSting();
+    W.audio.setSiren(false);
+    W.audio.setEngine(0, false);
+  }
+}
+
+export function updatePolice(dt) {
+  // Wanted level decays when the player keeps their nose clean and unseen.
+  if (W.wanted > 0 && W.mode === 'play') {
+    W.sinceCrime += dt;
     const nearestCop = Math.min(
-      ...S.cars.filter((c) => c.kind === 'police').map((c) => Math.hypot(c.mesh.position.x - S.player.pos.x, c.mesh.position.z - S.player.pos.z)),
-      ...S.cops.map((c) => Math.hypot(c.pos.x - S.player.pos.x, c.pos.z - S.player.pos.z)),
-      Infinity,
+      ...W.cops.map((c) => Math.hypot(c.pos.x - W.playerPos.x, c.pos.z - W.playerPos.z)),
+      ...W.footCops.map((c) => Math.hypot(c.pos.x - W.playerPos.x, c.pos.z - W.playerPos.z)),
+      999,
     );
-    if (wanted > 0 && nearestCop > 55) {
-      quietTimer += dt;
-      if (quietTimer > WANTED.decayDelay + WANTED.decayStep) {
-        S.wanted = Math.max(0, S.wanted - 1);
-        quietTimer = 0;
-        S.hud.showDialog('You lost them. Wanted level dropped.', 2.5);
-      }
-    } else {
-      quietTimer = 0;
+    if (W.sinceCrime > CFG.wantedDecaySeconds && nearestCop > 35) {
+      W.wanted -= 1;
+      W.sinceCrime = 0;
+      setDialog('The heat is cooling off…', 3);
     }
-    S.audio.siren(wanted >= 1);
   }
-
-  return { addHeat, update };
+  // Spawn pressure scales with the wanted level.
+  const wantCars = W.wanted === 0 ? 0 : Math.min(1 + W.wanted, 5);
+  const rng = mulberry32((Math.random() * 1e9) | 0);
+  if (W.mode === 'play' && W.cops.length < wantCars && Math.random() < 0.03) {
+    spawnCopCar(W.scene, rng);
+  }
+  if (W.mode === 'play' && W.wanted >= 2 && W.onFoot && W.footCops.length < Math.min(W.wanted, 3) && Math.random() < 0.02) {
+    spawnFootCop(W.scene, rng);
+  }
+  for (const cop of W.cops) copCarStep(cop, dt);
+  for (const cop of W.footCops) footCopStep(cop, dt);
+  // Despawn the pursuit when the heat is gone.
+  if (W.wanted === 0) {
+    for (const cop of W.cops) W.scene.remove(cop.group);
+    for (const cop of W.footCops) W.scene.remove(cop.group);
+    W.cops = [];
+    W.footCops = [];
+  }
+  if (W.audio) W.audio.setSiren(W.wanted > 0 && W.mode === 'play');
 }
