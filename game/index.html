@@ -3,17 +3,81 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Block Dodger</title>
+<title>Sunset Bay — an open-world crime game</title>
+<link rel="icon" href="data:,">
 <style>
-  html, body { margin: 0; height: 100%; overflow: hidden; background: #11141b; }
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #f7a55c; font-family: system-ui, -apple-system, "Segoe UI", sans-serif; }
   #game { position: fixed; inset: 0; width: 100%; height: 100%; display: block; touch-action: none; }
-  /* Read aloud, never shown: the status line screen readers announce. */
   #status { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+  #hud { position: fixed; inset: 0; pointer-events: none; display: none; color: #fff; text-shadow: 0 1px 3px rgba(0,0,0,.7); }
+  #top-left { position: absolute; top: 14px; left: 16px; }
+  #wanted { font-size: 30px; letter-spacing: 4px; color: #ffd23e; }
+  #health-row { margin-top: 6px; display: flex; align-items: center; gap: 8px; }
+  #health-bar { width: 170px; height: 14px; background: rgba(0,0,0,.55); border: 1px solid rgba(255,255,255,.6); border-radius: 3px; overflow: hidden; }
+  #health-fill { height: 100%; width: 100%; background: #2f9e6e; }
+  #health-text { font-weight: 700; font-size: 14px; }
+  #money { margin-top: 6px; font-size: 24px; font-weight: 800; color: #7dff9a; }
+  #minimap { position: absolute; top: 14px; right: 16px; width: 220px; height: 220px; border: 2px solid rgba(255,255,255,.75); border-radius: 6px; background: #20242e; }
+  #objective { position: absolute; left: 50%; bottom: 118px; transform: translateX(-50%); max-width: 70%; padding: 8px 16px; background: rgba(0,0,0,.6); border-radius: 6px; font-size: 17px; font-weight: 600; text-align: center; }
+  #dialog { position: absolute; left: 50%; bottom: 64px; transform: translateX(-50%); max-width: 70%; padding: 8px 16px; background: rgba(20,20,30,.75); border-left: 4px solid #ffd23e; border-radius: 4px; font-size: 16px; font-style: italic; opacity: 0; transition: opacity .3s; }
+  #speed { position: absolute; right: 20px; bottom: 18px; font-size: 26px; font-weight: 800; }
+  #weapon { position: absolute; left: 16px; bottom: 18px; font-size: 15px; font-weight: 600; }
+  #crosshair { position: absolute; left: 50%; top: 50%; width: 18px; height: 18px; margin: -9px 0 0 -9px; display: none; }
+  #crosshair::before, #crosshair::after { content: ""; position: absolute; background: #fff; box-shadow: 0 0 3px #000; }
+  #crosshair::before { left: 8px; top: 0; width: 2px; height: 18px; }
+  #crosshair::after { left: 0; top: 8px; width: 18px; height: 2px; }
+  .screen { position: fixed; inset: 0; display: none; align-items: center; justify-content: center; flex-direction: column; text-align: center; color: #fff; background: rgba(20, 12, 30, .28); text-shadow: 0 2px 8px rgba(0,0,0,.8); }
+  .screen h1 { font-size: 84px; margin: 0; letter-spacing: 6px; color: #ffd23e; }
+  .screen h2 { font-size: 26px; margin: 8px 0 4px; font-weight: 600; }
+  .screen p { font-size: 17px; max-width: 620px; line-height: 1.5; margin: 6px 0; }
+  .screen .prompt { margin-top: 22px; font-size: 20px; font-weight: 700; color: #7dff9a; animation: pulse 1.4s infinite; }
+  @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: .45; } }
+  #screen-over h1 { font-size: 96px; }
+  .keys { font-size: 14px; opacity: .9; }
 </style>
+<script type="importmap">
+{ "imports": { "three": "./vendor/three.module.min.js" } }
+</script>
 </head>
 <body>
-<canvas id="game" aria-label="Block Dodger: move the paddle left and right to dodge falling blocks and catch coins"></canvas>
+<canvas id="game" aria-label="Sunset Bay: an open-world crime game. Drive, steal cars, dodge the police and run jobs for Marla."></canvas>
 <p id="status" role="status" aria-live="polite"></p>
+
+<div id="hud">
+  <div id="top-left">
+    <div id="wanted" aria-label="Wanted level">☆☆☆☆☆</div>
+    <div id="health-row"><div id="health-bar"><div id="health-fill"></div></div><span id="health-text">100</span></div>
+    <div id="money">$0</div>
+  </div>
+  <canvas id="minimap" width="220" height="220" aria-label="Minimap"></canvas>
+  <div id="objective"></div>
+  <div id="dialog"></div>
+  <div id="speed"></div>
+  <div id="weapon">WASD move · E enter car · Q pistol/fists · F punch · P pause</div>
+  <div id="crosshair"></div>
+</div>
+
+<div class="screen" id="screen-title">
+  <h1>SUNSET BAY</h1>
+  <h2>A sunny city. A short fuse. A fixer named Marla.</h2>
+  <p>Explore the city on foot or behind the wheel. Steal cars, outrun the police, run four jobs and take the bay for yourself.</p>
+  <p class="keys">WASD move &amp; drive · Mouse drag to look · E get in / out of a car · Q pistol or fists · Click / F attack · P pause</p>
+  <p id="title-best"></p>
+  <p class="prompt">Click or press Space to start</p>
+</div>
+
+<div class="screen" id="screen-pause">
+  <h1>PAUSED</h1>
+  <p>The bay waits for you.</p>
+  <p class="prompt">Press P to keep playing</p>
+</div>
+
+<div class="screen" id="screen-over">
+  <h1 id="over-title">WASTED</h1>
+  <p id="over-stats"></p>
+  <p class="prompt">Press Space to try again</p>
+</div>
+
 <script type="module" src="./src/main.js"></script>
 </body>
 </html>
