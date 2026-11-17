@@ -1,39 +1,53 @@
-// Sunset Bay — the entrypoint program (Node 22, standard library only).
-// It copies game/ and screenshots/ from this repository into the output
-// directory and writes the dossier.json that buildDossier produces from
-// them, under the bounty's caps.
+// Sunset Bay, a working gta6-01 entry (Node 22, standard library only): the
+// game is this directory's game/ folder, plain static files a desktop browser
+// loads offline (game/index.html and its ES modules, plus the vendored
+// three.js under game/vendor, no network request at runtime), and this
+// program hands it in. It copies game/ and screenshots/ from beside this
+// file to /output and writes /output/dossier.json, the summary the judge
+// reads, with the vendored make.fun library.
 //
-// NOTE: the output directory itself must never be removed. In the grader
-// /output is a mount point whose parent is read-only for the entry's
-// user, so removing it throws (EACCES/EBUSY on rmdir) and the run fails
-// before anything is copied. Only the directory's CONTENTS are cleared,
-// best effort: an entry that cannot be removed is left in place and
-// never fails the run.
-import { cpSync, mkdirSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+// The output directory itself is sacred: in the grader's container /output
+// is a mount point whose parent is read-only, so removing it fails the run.
+// This program creates it if needed and clears only what is inside it, one
+// entry at a time, each removal best-effort — a stale file must never be able
+// to fail the run.
+//
+// Serve it locally with `node serve.ts`, then open http://localhost:8080.
+// Outside the grader's container, MAKEFUN_OUTPUT_DIR stands in for /output:
+//   mkdir -p out && MAKEFUN_OUTPUT_DIR=out node main.ts
+
+import { cpSync, existsSync, mkdirSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { buildDossier } from './vendor/makefun-game.ts';
 
-const repoRoot = dirname(fileURLToPath(import.meta.url));
-const outDir = process.env.MAKEFUN_OUTPUT_DIR || '/output';
+const here = fileURLToPath(new URL('.', import.meta.url));
+const out = process.env.MAKEFUN_OUTPUT_DIR ?? '/output';
 
-mkdirSync(outDir, { recursive: true });
-for (const entry of readdirSync(outDir)) {
+mkdirSync(out, { recursive: true });
+for (const entry of readdirSync(out)) {
   try {
-    rmSync(join(outDir, entry), { recursive: true, force: true });
+    rmSync(join(out, entry), { recursive: true, force: true });
   } catch {
-    // leave it; the copy below overwrites what it can
+    // The directory itself stays, and the run goes on: a leftover entry is
+    // overwritten by the copies below, or ignored by the dossier.
   }
 }
-cpSync(join(repoRoot, 'game'), join(outDir, 'game'), { recursive: true });
-cpSync(join(repoRoot, 'screenshots'), join(outDir, 'screenshots'), { recursive: true });
+cpSync(join(here, 'game'), join(out, 'game'), { recursive: true });
+mkdirSync(join(out, 'screenshots'), { recursive: true });
+if (existsSync(join(here, 'screenshots'))) cpSync(join(here, 'screenshots'), join(out, 'screenshots'), { recursive: true });
 
-const dossier = buildDossier(outDir, {
-  text_max_bytes: 163840,
-  screenshots: { max: 4, max_bytes: 262144 },
-  game_max_files: 993,
-  game_max_bytes: 50331648,
-  game_path_max_bytes: 1000,
-});
-writeFileSync(join(outDir, 'dossier.json'), dossier);
-console.log(`Sunset Bay dossier written to ${join(outDir, 'dossier.json')}`);
+// The scorer's own caps (reference/gate.json): only text_max_bytes shapes the bytes; the others refuse an entry the
+// scorer would refuse (more than 4 screenshots or one over 256 KiB; more than 993 files in game/ or 48 MiB of game
+// files, in all, or a path under game/ over 1000 bytes: game/ counts beside /output's own 1000-entry cap, its
+// screenshots/ and dossier.json).
+writeFileSync(
+  join(out, 'dossier.json'),
+  buildDossier(out, {
+    text_max_bytes: 163840,
+    screenshots: { max: 4, max_bytes: 262144 },
+    game_max_files: 993,
+    game_max_bytes: 50331648,
+    game_path_max_bytes: 1000,
+  }),
+);
