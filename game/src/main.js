@@ -1,243 +1,160 @@
-// Sunset Bay — boot and the one loop. The game moves between four screens
-// (title, play, paused, game over); in play the world advances in fixed 1/60 s
-// steps and the renderer paints what is there. On the title screen the city
-// idles behind the menu and the camera slowly orbits it.
-//
-// ?seed=N fixes the random city. ?shot=start|play|chase|end (with &seed=N)
-// stages that scene instead of running the loop, paints it a few times and
-// sets window.__shotReady for a screenshot once the frame has reached the
-// screen.
-
-import { CAR, LANDMARKS, STEP } from './config.js';
-import { createRandom } from './random.js';
-import { createWorldState } from './world.js';
-import { createCity } from './city.js';
-import { createInput } from './input.js';
-import { createAudio } from './audio.js';
-import { createHud } from './hud.js';
-import { createRenderer } from './render.js';
-import { createVehicles } from './vehicles.js';
-import { createTraffic } from './traffic.js';
-import { createPolice } from './police.js';
-import { createCombat } from './combat.js';
-import { createMissions } from './missions.js';
-import { createPlayer } from './player.js';
-import { loadSave, saveGame } from './save.js';
+// Sunset Bay — bootstrap and the main loop. Builds the city, spawns the
+// player and the population, wires the keys, and runs the frame: input,
+// player, driving, traffic, police, missions, combat, camera, HUD.
+import * as THREE from 'three';
+import { CFG, mulberry32 } from './config.js';
+import { W, setDialog, setObjective, resetRun } from './world.js';
+import { buildCity } from './city.js';
+import { initRenderer, updateCamera, renderFrame } from './render.js';
+import { initInput, keys, pressed, mouse, axis, lockPointer, endFrameInput } from './input.js';
+import { GameAudio } from './audio.js';
+import { loadGame, saveGame } from './save.js';
+import { makePlayerMesh, updatePlayer } from './player.js';
+import { spawnParkedCars, drivePlayerCar, tryEnterExitCar } from './vehicles.js';
+import { spawnPopulation, updateTraffic } from './traffic.js';
+import { updatePolice, bustPlayer, wastePlayer } from './police.js';
+import { makeBeacon, updateMissions, tryStartMission } from './missions.js';
+import { makePistolView, togglePistol, punch, shoot, reload, updateCombat } from './combat.js';
+import { initHud, updateHud, showScreen, showEndScreen } from './hud.js';
 import { stageShot } from './shots.js';
 
-/** The longest frame the loop catches up on; a longer stall is dropped, not replayed. */
-const MAX_FRAME = 0.25;
-
-const params = new URLSearchParams(window.location.search);
-const shot = params.get('shot');
-const seedParam = Number.parseInt(params.get('seed') ?? '', 10);
-const seed = Number.isInteger(seedParam) ? seedParam : 7;
-
-const canvas = document.getElementById('game');
-const status = document.getElementById('status');
-const view = createRenderer(canvas);
-const rng = createRandom(seed);
-const saved = loadSave() || { money: 0, missionIndex: 0, best: 0, storyDone: false };
-
-// The shared state every system reads and writes, built by world.js.
-const S = createWorldState(view, rng, saved);
-S.damagePlayer = function damagePlayer(amount) {
-  if (S.screen !== 'play') return;
-  S.player.health -= amount;
-  if (S.player.health <= 0) {
-    S.player.health = 0;
-    endGame('wasted');
-  }
-};
-S.save = function save() {
-  saveGame({ money: S.player.money, missionIndex: S.missionIndex, best: S.best, storyDone: S.storyDone });
-};
-
-S.city = createCity(S.scene, rng);
-S.input = createInput(canvas);
-S.audio = createAudio();
-S.vehicles = createVehicles(S.scene, S);
-S.traffic = createTraffic(S.scene, S);
-S.police = createPolice(S.scene, S);
-S.combat = createCombat(S.scene, S);
-S.hud = createHud(S);
-S.missions = createMissions(S.scene, S);
-S.playerCtl = createPlayer(S.scene, S);
-S.traffic.init();
-S.missions.init();
-
-// A read-only handle for debugging and play-testing in the console.
-window.__sunset = S;
-
-function endGame(reason) {
-  S.screen = 'over';
-  S.overReason = reason;
-  S.audio.busted();
-  S.audio.siren(false);
-  S.audio.engine(0);
-  S.save();
-  S.hud.setScreen('over', { reason, money: S.player.money, best: S.best });
-  status.textContent = reason === 'busted' ? 'Busted. The cops took you in.' : 'Wasted. Sunset Bay got you.';
-}
+let canvasHost = null;
 
 function startGame() {
-  // Clear the last run's heat: enemies, cops and cruisers all stand down.
-  for (const e of [...S.enemies]) {
-    S.scene.remove(e.mesh);
-    S.enemies.splice(S.enemies.indexOf(e), 1);
-  }
-  for (const c of [...S.cops]) {
-    S.scene.remove(c.mesh);
-    S.cops.splice(S.cops.indexOf(c), 1);
-  }
-  for (const car of [...S.cars]) {
-    if (car.kind === 'police') S.vehicles.removeCar(car);
-  }
-  if (S.player.car) {
-    S.player.car.driver = null;
-    S.player.car = null;
-  }
-  const p = S.player;
-  p.health = 100;
-  p.pos.set(LANDMARKS.spawn.x, 0, LANDMARKS.spawn.z);
-  p.heading = 0;
-  p.onFoot = true;
-  p.pistol = false;
-  p.mesh.visible = true;
-  p.mesh.position.copy(p.pos);
-  S.wanted = 0;
-  S.bustTimer = 0;
-  S.cameraYaw = Math.PI * 0.15;
-  S.cameraPitch = 0.35;
-  S.missions.init();
-  S.screen = 'play';
-  S.hud.setScreen('play');
-  S.audio.ensure();
-  S.audio.click();
-  status.textContent = 'Playing. Sunset Bay is yours.';
+  W.audio.ensure();
+  resetRun();
+  if (W.storyDone) setObjective('Story complete — free roam Sunset Bay!');
+  else setObjective(`Mission ${W.missionIndex + 1} — press M to start`);
+  setDialog("Marla: 'Welcome to Sunset Bay. Grab a car, press M when you are ready for work.'", 8);
+  showScreen(null);
+  lockPointer(canvasHost);
+  saveGame();
 }
 
-function stepPlay(dt) {
-  S.time += dt;
-  const p = S.player;
+function endToTitle() {
+  W.mode = 'title';
+  showScreen('title');
+}
 
-  if (S.input.take('pause')) {
-    S.screen = 'paused';
-    S.hud.setScreen('paused');
-    S.audio.engine(0);
-    status.textContent = 'Paused.';
-    return;
+function togglePause() {
+  if (W.mode === 'play') {
+    W.mode = 'paused';
+    showScreen('pause');
+    if (W.audio) W.audio.setEngine(0, false);
+  } else if (W.mode === 'paused') {
+    W.mode = 'play';
+    showScreen(null);
+  }
+}
+
+function handleKeys() {
+  if (pressed.Enter) {
+    if (W.mode === 'title') startGame();
+    else if (W.mode === 'busted' || W.mode === 'wasted') startGame();
+  }
+  if (pressed.KeyP || pressed.Escape) {
+    if (W.mode === 'play' || W.mode === 'paused') togglePause();
+  }
+  if (W.mode !== 'play') return;
+  if (pressed.KeyE) tryEnterExitCar();
+  if (pressed.KeyM) tryStartMission();
+  if (pressed.KeyQ) togglePistol();
+  if (pressed.KeyF) punch();
+  if (pressed.KeyR) reload();
+  if (pressed.KeyH) {
+    // Honk / flash: small flavor, no gameplay effect.
+    if (W.audio) W.audio.blip(320, 0.25, 'square', 0.15);
+  }
+  if (mouse.click) {
+    if (W.pistolOut && W.onFoot) shoot();
+    else if (!mouse.locked) lockPointer(canvasHost);
+  }
+}
+
+function frame(now) {
+  requestAnimationFrame(frame);
+  const dt = Math.min(0.05, (now - (frame.last ?? now)) / 1000 || 0.016);
+  frame.last = now;
+  W.dt = dt;
+  W.time += dt;
+
+  handleKeys();
+
+  if (W.mode === 'play' || W.mode === 'title') {
+    // Autopilot (screenshot scenes) drives the car straight down the road.
+    const input = W.autopilot && !W.onFoot
+      ? { forward: 1, strafe: 0, run: false }
+      : axis();
+    if (W.mode === 'play') {
+      if (W.onFoot) updatePlayer(dt, input);
+      else drivePlayerCar(dt, input);
+      updateMissions(dt);
+      updatePolice(dt);
+      updateCombat(dt);
+    }
+    updateTraffic(dt);
+    updateCamera(dt);
+    updateHud();
+  } else if (W.mode === 'paused' || W.mode === 'busted' || W.mode === 'wasted') {
+    updateCamera(dt);
   }
 
-  if (p.car) {
-    const move = S.input.move();
-    const look = S.input.takeLook();
-    if (look.dx !== 0 || look.dy !== 0) S.lastDragTime = S.time;
-    S.cameraYaw -= look.dx * 0.005;
-    S.cameraPitch = Math.max(0.05, Math.min(0.9, S.cameraPitch + look.dy * 0.003));
-    const throttle = move.forward;
-    // D steers right: heading must fall, so the steer sign is flipped.
-    const steer = -move.strafe;
-    S.vehicles.drive(p.car, dt, throttle, steer);
-    // The player's map position rides with the car while driving.
-    p.pos.copy(p.car.mesh.position);
-    if (S.input.take('interact')) S.playerCtl.exitCar();
+  renderFrame();
+  endFrameInput();
+}
+
+function boot() {
+  canvasHost = document.getElementById('game-canvas');
+  const { scene, camera } = initRenderer();
+  initInput(canvasHost);
+  initHud();
+  W.audio = new GameAudio();
+
+  buildCity(scene);
+  const player = makePlayerMesh();
+  player.position.set(CFG.spawn.x, 0, CFG.spawn.z);
+  scene.add(player);
+  W.player = player;
+  W.playerPos = { x: CFG.spawn.x, z: CFG.spawn.z };
+
+  spawnParkedCars(scene, mulberry32(424242));
+  spawnPopulation(scene);
+  makeBeacon(scene);
+  makePistolView(scene, camera);
+
+  // Restore saved progress (money + missions) before the first frame.
+  const saved = loadGame();
+  if (saved && (saved.missionIndex > 0 || saved.money > 0)) {
+    setObjective(
+      saved.storyDone
+        ? 'Story complete — free roam Sunset Bay!'
+        : `Mission ${saved.missionIndex + 1} — press M to start (save restored: $${saved.money})`,
+    );
+  }
+
+  // Clicking the title / pause / end screens starts or resumes.
+  const titleBtn = document.getElementById('start-btn');
+  if (titleBtn) titleBtn.addEventListener('click', () => startGame());
+  const resumeBtn = document.getElementById('resume-btn');
+  if (resumeBtn) resumeBtn.addEventListener('click', () => togglePause());
+  const againBtn = document.getElementById('again-btn');
+  if (againBtn) againBtn.addEventListener('click', () => startGame());
+  document.getElementById('screen-title')?.addEventListener('click', (e) => {
+    if (e.target.id === 'screen-title') startGame();
+  });
+
+  // Screenshot staging, if the URL asks for it.
+  const shot = new URLSearchParams(location.search).get('shot');
+  if (shot) {
+    stageShot(shot, scene);
   } else {
-    S.playerCtl.update(dt);
+    showScreen('title');
   }
 
-  S.city.update(dt, S.time);
-  S.traffic.update(dt);
-  S.police.update(dt);
-  S.combat.update(dt);
-  S.missions.update(dt, S.time);
-  S.vehicles.update(dt);
-  S.audio.engine(p.car ? Math.abs(p.car.speed) / CAR.maxSpeed : 0);
-  S.hud.update();
-  S.input.endFrame();
-}
+  // Debug handle for playtests (read-only inspection from the console).
+  window.__SB = { W, CFG };
 
-function stepTitle(dt) {
-  S.time += dt;
-  S.city.update(dt, S.time);
-  S.traffic.update(dt);
-  S.input.endFrame();
-}
-
-function runShot(name) {
-  const staged = stageShot(name, S);
-  const started = performance.now();
-  function paint() {
-    if (staged.establishing) view.establishing(S, S.time);
-    else view.follow(S, STEP);
-    S.hud.update();
-    view.render();
-    // Keep painting for two seconds: the compositor needs a few presented
-    // frames before a WebGL canvas actually shows up in a screenshot, and a
-    // capture taken on the very first ready frame can still catch the clear
-    // colour instead of the city.
-    if (performance.now() - started < 2000) requestAnimationFrame(paint);
-    else window.__shotReady = true;
-  }
-  requestAnimationFrame(paint);
-}
-
-function runGame() {
-  let accumulator = 0;
-  let last = performance.now();
-  S.hud.setScreen('title', { best: S.best });
-  status.textContent = 'Sunset Bay. Press Space or click to start.';
-
-  function frame(now) {
-    requestAnimationFrame(frame);
-    accumulator += Math.min((now - last) / 1000, MAX_FRAME);
-    last = now;
-    if (S.screen === 'title') {
-      if (S.input.take('confirm')) startGame();
-      while (accumulator >= STEP && S.screen === 'title') {
-        stepTitle(STEP);
-        accumulator -= STEP;
-      }
-      view.establishing(S, S.time);
-    } else if (S.screen === 'play') {
-      while (accumulator >= STEP) {
-        stepPlay(STEP);
-        accumulator -= STEP;
-        if (S.screen !== 'play') break;
-      }
-      if (S.screen === 'play') view.follow(S, STEP);
-    } else if (S.screen === 'paused') {
-      if (S.input.take('pause') || S.input.take('confirm')) {
-        S.screen = 'play';
-        S.hud.setScreen('play');
-        status.textContent = 'Playing.';
-      }
-      S.input.endFrame();
-      view.follow(S, STEP);
-    } else if (S.screen === 'over') {
-      if (S.input.take('confirm')) startGame();
-      S.input.endFrame();
-      view.follow(S, STEP);
-    }
-    if (S.screen !== 'title') view.render();
-    else view.render();
-  }
-
-  // Leaving the tab pauses a running game rather than letting the city run on.
-  document.addEventListener('visibilitychange', () => {
-    if (document.hidden && S.screen === 'play') {
-      S.screen = 'paused';
-      S.hud.setScreen('paused');
-      S.audio.engine(0);
-      status.textContent = 'Paused.';
-    }
-  });
-
-  canvas.addEventListener('pointerdown', () => {
-    if (S.screen === 'title' || S.screen === 'over') startGame();
-  });
   requestAnimationFrame(frame);
 }
 
-if (shot) runShot(shot);
-else runGame();
+boot();
