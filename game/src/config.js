@@ -1,111 +1,115 @@
-// Sunset Bay — every tuning number in one place. The city is a road grid on the
-// XZ plane (y is up); the beach runs along the south edge and the sea beyond it.
-// All speeds are metres per second, all angles radians, all money dollars.
-
-export const STEP = 1 / 60;
-
-export const WORLD = {
-  minX: -170,
-  maxX: 170,
-  minZ: -170,
-  maxZ: 166,
-  /** South of this z the ground turns to sand, then sea. */
-  beachZ: 132,
-  waterZ: 168,
-};
-
-/** Centre lines of the north-south and east-west roads. */
-export const ROADS = [-120, -60, 0, 60, 120];
-export const ROAD_WIDTH = 14;
-export const ROAD_HALF = ROAD_WIDTH / 2;
-
-/** Named corners of the city the missions and the HUD point at. */
-export const LANDMARKS = {
-  plaza: { x: 0, z: 0 },
-  parcelPickup: { x: -120, z: -60 },
-  parcelDrop: { x: 60, z: 120 },
-  hideout: { x: 120, z: 120 },
-  bank: { x: 60, z: -60 },
-  turf: { x: -60, z: 60 },
-  marina: { x: -120, z: 120 },
+// Sunset Bay — shared tuning constants, the seeded random helper, and the
+// mission table. Everything here is plain data: no scene, no DOM, no audio.
+export const CFG = {
+  // City layout: roads run on a 40-unit grid, blocks are 40x40.
+  grid: 40,
+  roadHalf: 6,
+  cityHalf: 200,
+  // Beach and sea sit east of the city (positive X).
+  beachX: 208,
+  seaX: 236,
+  // Player on foot.
+  walkSpeed: 6.5,
+  runSpeed: 11,
+  playerRadius: 0.9,
+  // Driving.
+  carAccel: 26,
+  carBrake: 42,
+  carMaxSpeed: 40,
+  carReverseMax: 13,
+  carSteer: 2.1,
+  carGrip: 3.2,
+  // Wanted / police.
+  maxWanted: 5,
+  wantedDecaySeconds: 18,
+  copChaseSpeed: 34,
+  copRamDamage: 6,
+  // Combat.
+  pistolDamage: 34,
+  punchDamage: 34,
+  punchRange: 2.6,
+  pistolRange: 90,
+  startAmmo: 36,
+  enemyHealth: 100,
+  // Missions.
+  hideout: { x: -160, z: 160 },
+  bank: { x: -120, z: -60 },
+  plaza: { x: 60, z: 120 },
+  delivery: { x: 150, z: -150 },
   spawn: { x: 0, z: 24 },
 };
 
-export const PLAYER = {
-  walkSpeed: 7,
-  runSpeed: 11,
-  radius: 0.55,
-  accel: 40,
-  health: 100,
-  punchRange: 2.4,
-  punchDamage: 25,
-  punchCooldown: 0.45,
-  shootCooldown: 0.28,
-  shootDamage: 34,
-  shootRange: 90,
-};
+// Deterministic seeded random (mulberry32). Used for the city layout and for
+// the screenshot scenes so the same seed always builds the same Sunset Bay.
+export function mulberry32(seed) {
+  let a = seed >>> 0;
+  return function next() {
+    a |= 0;
+    a = (a + 0x6d2b79f5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
 
-export const CAR = {
-  accel: 16,
-  brake: 30,
-  reverseAccel: 10,
-  maxSpeed: 42,
-  maxReverse: 10,
-  turnRate: 1.9,
-  radius: 1.6,
-  health: 100,
-  npcSpeed: 11,
-  policeSpeed: 46,
-  enterRange: 3.2,
-};
+export function pick(rng, list) {
+  return list[Math.floor(rng() * list.length)];
+}
 
-export const PED = {
-  count: 18,
-  walkSpeed: 1.6,
-  radius: 0.5,
-};
+export function range(rng, lo, hi) {
+  return lo + rng() * (hi - lo);
+}
 
-export const TRAFFIC = {
-  count: 9,
-  minGap: 9,
-};
-
-export const WANTED = {
-  max: 5,
-  stealHeat: 1,
-  hitPedHeat: 1,
-  hitCarHeat: 0.5,
-  shootHeat: 1,
-  /** Seconds with no crime and no cop nearby before a star fades. */
-  decayDelay: 18,
-  decayStep: 9,
-  /** Police cars on the street per wanted star. */
-  carsPerStar: 1,
-  footCopsPerStar: 1,
-};
-
+// The four missions Marla hands out, in order. `target` is the beacon's
+// position, `timeLimit` seconds (0 = no clock), `reward` dollars.
 export const MISSIONS = [
-  { name: 'Parcel Run', reward: 150 },
-  { name: 'Hot Wheels', reward: 250 },
-  { name: 'Turf War', reward: 400 },
-  { name: 'Sunset Score', reward: 800 },
+  {
+    id: 1,
+    name: 'The Package',
+    brief:
+      "Marla: 'Sunset Bay, baby. A package needs to reach the north docks — fast, quiet, no questions. Take any car you like. The clock is already running.'",
+    objective: 'Deliver the package to the docks beacon',
+    target: { x: 150, z: -150 },
+    timeLimit: 120,
+    reward: 500,
+  },
+  {
+    id: 2,
+    name: 'Hot Wheels',
+    brief:
+      "Marla: 'The heat is on you now. Lose the cruisers and get to the hideout on the west edge. Do not stop. Do not get caught.'",
+    objective: 'Escape the police — reach the hideout',
+    target: { x: -160, z: 160 },
+    timeLimit: 150,
+    reward: 800,
+  },
+  {
+    id: 3,
+    name: 'Turf War',
+    brief:
+      "Marla: 'Rivals moved into the plaza and they carry guns. Clear all three of them out. Punch or pistol — your call, but make it count.'",
+    objective: 'Defeat the 3 armed rivals at the plaza',
+    target: { x: 60, z: 120 },
+    timeLimit: 0,
+    reward: 1200,
+  },
+  {
+    id: 4,
+    name: 'The Bank Job',
+    brief:
+      "Marla: 'Last one. Grab the cash at the Bay Bank, then run for the hideout with every cruiser in the city on your tail. We retire after this.'",
+    objective: 'Grab the bank cash, then reach the hideout',
+    target: { x: -120, z: -60 },
+    timeLimit: 0,
+    reward: 2500,
+  },
 ];
 
-export const PALETTE = {
-  sky: 0xffb36b,
-  fog: 0xf7a55c,
-  sun: 0xffe0b3,
-  ground: 0x9aa08a,
-  sidewalk: 0xb8b2a4,
-  asphalt: 0x3a3d46,
-  sand: 0xe8cf9a,
-  sea: 0x2e7f9e,
-  building: [0xe8b48a, 0xd98a6a, 0xc9d6de, 0xf2d492, 0xa8c6a0, 0xe09a9a, 0x8fb8c9, 0xd9c1a3],
-  lamp: 0xffe9a8,
-  player: 0x2f9e6e,
-  police: 0x1c4fd7,
-  enemy: 0xc23b2e,
+export const DIALOG_LINES = {
+  missionDone:
+    "Marla: 'Clean work. The money is yours — next job is on the board when you are ready.'",
+  busted: "The Sunset Bay PD has you. The run ends here — for now.",
+  wasted: 'Sunset Bay chewed you up. Get patched up and come back swinging.',
+  steal: "You jacked a ride. The city noticed.",
+  pickup: 'Picked up. Nice.',
 };
-
-export const SAVE_KEY = 'sunset-bay.save.v1';
-export const FONT = 'system-ui, -apple-system, "Segoe UI", sans-serif';
