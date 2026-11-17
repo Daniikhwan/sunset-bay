@@ -1,89 +1,75 @@
-// The Three.js renderer and the chase camera. One warm directional sun plus
-// a hemisphere light give the sunset look; fog melts the city edge into the
-// sky. The camera rides behind the player on foot and behind the car while
-// driving, easing toward the car's heading unless the player just dragged
-// the mouse to look around.
-
+// Sunset Bay — rendering: the WebGL renderer, the camera rig, and the
+// per-frame camera follow. The camera chases the player from behind (or
+// behind the car), smoothed so driving at speed still feels steady.
 import * as THREE from 'three';
-import { PALETTE } from './config.js';
+import { CFG } from './config.js';
+import { W } from './world.js';
 
-export function createRenderer(canvas) {
-  const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
-  renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+let camPos = new THREE.Vector3(0, 8, -14);
+let camLook = new THREE.Vector3(0, 1.5, 0);
+
+export function initRenderer() {
+  const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
   renderer.setSize(window.innerWidth, window.innerHeight);
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+  renderer.shadowMap.enabled = true;
+  renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+  renderer.outputColorSpace = THREE.SRGBColorSpace;
+  renderer.toneMapping = THREE.ACESFilmicToneMapping;
+  renderer.toneMappingExposure = 1.05;
+  document.getElementById('game-canvas').appendChild(renderer.domElement);
+
   const scene = new THREE.Scene();
-  scene.background = new THREE.Color(PALETTE.sky);
-  scene.fog = new THREE.Fog(PALETTE.fog, 180, 620);
+  const camera = new THREE.PerspectiveCamera(68, window.innerWidth / window.innerHeight, 0.1, 900);
+  camera.position.set(0, 8, -14);
+  scene.add(camera);
 
-  const hemi = new THREE.HemisphereLight(0xffe0b3, 0x5a4a3a, 0.95);
-  scene.add(hemi);
-  const sun = new THREE.DirectionalLight(PALETTE.sun, 1.6);
-  sun.position.set(-80, 120, -60);
-  scene.add(sun);
-
-  const camera = new THREE.PerspectiveCamera(62, window.innerWidth / window.innerHeight, 0.1, 900);
-  camera.position.set(0, 30, 60);
-
-  function resize() {
-    renderer.setSize(window.innerWidth, window.innerHeight);
+  window.addEventListener('resize', () => {
     camera.aspect = window.innerWidth / window.innerHeight;
     camera.updateProjectionMatrix();
+    renderer.setSize(window.innerWidth, window.innerHeight);
+  });
+
+  W.scene = scene;
+  W.camera = camera;
+  W.renderer = renderer;
+  return { renderer, scene, camera };
+}
+
+export function updateCamera(dt) {
+  const cam = W.camera;
+  if (!cam) return;
+  let targetPos;
+  let lookAt;
+  let dist;
+  let height;
+  if (W.onFoot) {
+    targetPos = new THREE.Vector3(W.playerPos.x, 0, W.playerPos.z);
+    lookAt = new THREE.Vector3(W.playerPos.x, 1.6, W.playerPos.z);
+    dist = 7.5;
+    height = 3.2;
+  } else {
+    const car = W.car;
+    targetPos = new THREE.Vector3(car.pos.x, 0, car.pos.z);
+    lookAt = new THREE.Vector3(car.pos.x, 1.4, car.pos.z);
+    dist = 10.5 + Math.abs(W.carSpeed) * 0.12;
+    height = 4.2;
   }
-  window.addEventListener('resize', resize);
+  // Follow behind the facing direction: on foot the camera yaw, in a car the
+  // car's yaw, eased toward each other so turns sweep smoothly.
+  const followYaw = W.onFoot ? W.camYaw : W.car.yaw;
+  const pitch = W.onFoot ? W.camPitch : -0.22;
+  const cx = targetPos.x - Math.sin(followYaw) * Math.cos(pitch) * dist;
+  const cz = targetPos.z - Math.cos(followYaw) * Math.cos(pitch) * dist;
+  const cy = targetPos.y + height - Math.sin(pitch) * dist * 0.6;
+  const desired = new THREE.Vector3(cx, cy, cz);
+  const k = 1 - Math.exp(-dt * (W.onFoot ? 9 : 6));
+  camPos.lerp(desired, k);
+  camLook.lerp(lookAt, 1 - Math.exp(-dt * 12));
+  cam.position.copy(camPos);
+  cam.lookAt(camLook);
+}
 
-  const target = new THREE.Vector3();
-  const camPos = new THREE.Vector3();
-
-  function lerpAngle(a, b, t) {
-    let d = b - a;
-    while (d > Math.PI) d -= Math.PI * 2;
-    while (d < -Math.PI) d += Math.PI * 2;
-    return a + d * t;
-  }
-
-  /** Place the camera for one frame from the shared state. */
-  function follow(S, dt) {
-    const p = S.player;
-    const driving = !p.onFoot && p.car;
-    if (driving) {
-      const wantYaw = p.car.heading + Math.PI;
-      const dragged = S.time - (S.lastDragTime || -10) < 1.5;
-      if (!dragged) S.cameraYaw = lerpAngle(S.cameraYaw, wantYaw, 1 - Math.exp(-2.2 * dt));
-      S.cameraDist = 13;
-      S.cameraPitch = Math.max(S.cameraPitch, 0.22);
-    } else {
-      S.cameraDist = 9;
-    }
-    target.copy(p.pos);
-    if (driving) target.copy(p.car.mesh.position);
-    target.y = 1.6;
-    const dist = S.cameraDist;
-    const hDist = dist * Math.cos(S.cameraPitch);
-    const height = 1.2 + dist * Math.sin(S.cameraPitch);
-    const fx = Math.sin(S.cameraYaw);
-    const fz = Math.cos(S.cameraYaw);
-    camPos.set(target.x - fx * hDist, target.y + height, target.z - fz * hDist);
-    camera.position.copy(camPos);
-    camera.lookAt(target.x + fx * 2.5, target.y + 0.4, target.z + fz * 2.5);
-  }
-
-  /** A high establishing view of the city, used by the title screen. The
-   * orbit stays 70 m up — above the tallest roof — so it never clips a
-   * building on its way around. */
-  function establishing(S, time) {
-    const a = time * 0.03;
-    camera.position.set(Math.sin(a) * 120, 70, Math.cos(a) * 120);
-    camera.lookAt(0, 0, 0);
-  }
-
-  return {
-    renderer,
-    scene,
-    camera,
-    follow,
-    establishing,
-    render() {
-      renderer.render(scene, camera);
-    },
-  };
+export function renderFrame() {
+  if (W.renderer && W.scene && W.camera) W.renderer.render(W.scene, W.camera);
 }
