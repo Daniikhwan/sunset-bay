@@ -1,122 +1,84 @@
-// The player on foot: a small figure that walks and runs in the direction the
-// camera faces, bumps into buildings, and climbs in and out of cars. When the
-// player is driving, this module does nothing — vehicles.js owns the car —
-// except keep the figure hidden inside it.
-
+// Sunset Bay — the player on foot: the character mesh, WASD movement
+// relative to the camera, sprinting, and the third-person camera rig that
+// follows from behind with mouse-look (pointer lock).
 import * as THREE from 'three';
-import { CAR, PLAYER } from './config.js';
-import { resolveCircle } from './city.js';
+import { CFG } from './config.js';
+import { W } from './world.js';
+import { resolveBlocked } from './city.js';
+import { mouse } from './input.js';
 
-export function createPlayer(scene, S) {
+export function makePlayerMesh() {
   const group = new THREE.Group();
-  const body = new THREE.Mesh(
-    new THREE.BoxGeometry(0.7, 1.0, 0.42),
-    new THREE.MeshLambertMaterial({ color: PALETTE_PLAYER }),
-  );
-  body.position.y = 0.95;
-  group.add(body);
-  const head = new THREE.Mesh(
-    new THREE.SphereGeometry(0.28, 10, 8),
-    new THREE.MeshLambertMaterial({ color: 0xe8b98a }),
-  );
-  head.position.y = 1.68;
-  group.add(head);
-  const legs = new THREE.Mesh(
-    new THREE.BoxGeometry(0.6, 0.5, 0.4),
-    new THREE.MeshLambertMaterial({ color: 0x2c3440 }),
-  );
-  legs.position.y = 0.25;
-  legs.name = 'legs';
+  const jacket = new THREE.MeshLambertMaterial({ color: 0xff5a3c });
+  const jeans = new THREE.MeshLambertMaterial({ color: 0x2c4a6e });
+  const skin = new THREE.MeshLambertMaterial({ color: 0xe0ac69 });
+  const legs = new THREE.Mesh(new THREE.BoxGeometry(0.44, 0.82, 0.28), jeans);
+  legs.position.y = 0.41;
+  legs.castShadow = true;
   group.add(legs);
-  scene.add(group);
-
-  const p = S.player;
-  p.mesh = group;
-  group.position.copy(p.pos);
-  group.rotation.y = p.heading;
-
-  function enterCar(car) {
-    if (car.driver === 'npc') {
-      // Yank the driver out: stealing a driven car is a crime.
-      car.driver = null;
-      S.police.addHeat(1);
-      S.hud.showDialog('You jacked the car! The driver ran off shouting.', 3);
-    } else {
-      S.hud.showDialog('You got in the car.', 1.5);
-    }
-    car.driver = 'player';
-    car.parked = false;
-    p.onFoot = false;
-    p.car = car;
-    group.visible = false;
-    S.audio.ensure();
+  const torso = new THREE.Mesh(new THREE.BoxGeometry(0.58, 0.66, 0.34), jacket);
+  torso.position.y = 1.15;
+  torso.castShadow = true;
+  group.add(torso);
+  const head = new THREE.Mesh(new THREE.SphereGeometry(0.27, 12, 10), skin);
+  head.position.y = 1.72;
+  head.castShadow = true;
+  group.add(head);
+  // Sunset cap.
+  const cap = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.28, 0.29, 0.1, 12),
+    new THREE.MeshLambertMaterial({ color: 0xf2c14e }),
+  );
+  cap.position.y = 1.92;
+  group.add(cap);
+  for (const ax of [-0.36, 0.36]) {
+    const arm = new THREE.Mesh(new THREE.BoxGeometry(0.14, 0.62, 0.14), jacket);
+    arm.position.set(ax, 1.12, 0);
+    arm.castShadow = true;
+    group.add(arm);
   }
-
-  function exitCar() {
-    const car = p.car;
-    if (!car) return;
-    car.driver = null;
-    car.speed = 0;
-    const side = { x: Math.cos(car.heading), z: -Math.sin(car.heading) };
-    p.pos.set(car.mesh.position.x + side.x * 2.2, 0, car.mesh.position.z + side.z * 2.2);
-    resolveCircle(S.city.colliders, p.pos, PLAYER.radius);
-    p.onFoot = true;
-    p.car = null;
-    group.visible = true;
-    group.position.copy(p.pos);
-  }
-
-  function update(dt) {
-    if (!p.onFoot) {
-      // Ride along: the figure stays hidden at the car's seat.
-      group.position.copy(p.car.mesh.position);
-      return;
-    }
-    const move = S.input.move();
-    const look = S.input.takeLook();
-    S.cameraYaw -= look.dx * 0.005;
-    S.cameraPitch = Math.max(-0.15, Math.min(0.9, S.cameraPitch + look.dy * 0.003));
-    const speed = move.run ? PLAYER.runSpeed : PLAYER.walkSpeed;
-    // Movement is relative to where the camera looks: W walks away from the
-    // camera, D strafes to the camera's right (which is -x when facing +z).
-    const sin = Math.sin(S.cameraYaw);
-    const cos = Math.cos(S.cameraYaw);
-    let mx = sin * move.forward - cos * move.strafe;
-    let mz = cos * move.forward + sin * move.strafe;
-    const len = Math.hypot(mx, mz);
-    if (len > 0.01) {
-      mx /= len;
-      mz /= len;
-      p.pos.x += mx * speed * dt;
-      p.pos.z += mz * speed * dt;
-      p.heading = Math.atan2(mx, mz);
-      p.walkPhase += dt * speed * 1.6;
-      legs.position.y = 0.25 + Math.abs(Math.sin(p.walkPhase)) * 0.12;
-    }
-    p.pos.x = Math.max(-168, Math.min(168, p.pos.x));
-    p.pos.z = Math.max(-168, Math.min(164, p.pos.z));
-    resolveCircle(S.city.colliders, p.pos, PLAYER.radius);
-    group.position.copy(p.pos);
-    group.rotation.y = p.heading;
-
-    if (S.input.take('interact')) {
-      const car = S.vehicles.nearestCar(p.pos, CAR.enterRange);
-      if (car) enterCar(car);
-      else S.missions.tryInteract();
-    }
-    if (S.input.take('weapon')) {
-      p.pistol = !p.pistol;
-      S.hud.showDialog(p.pistol ? 'Pistol out. Click to shoot.' : 'Fists out. Click or press F to punch.', 2);
-      S.audio.click();
-    }
-    if (S.input.take('punch')) S.combat.punch();
-    if (S.input.take('attack')) {
-      if (p.pistol) S.combat.shoot();
-      else S.combat.punch();
-    }
-  }
-
-  return { update, enterCar, exitCar };
+  group.userData.armL = group.children[4];
+  group.userData.armR = group.children[5];
+  return group;
 }
 
-const PALETTE_PLAYER = 0x2f9e6e;
+export function updatePlayer(dt, input) {
+  if (!W.onFoot || W.mode !== 'play') return;
+  // Mouse look: yaw follows the mouse, pitch clamps.
+  W.camYaw -= mouse.dx * 0.0028;
+  W.camPitch = Math.max(-1.1, Math.min(0.35, W.camPitch - mouse.dy * 0.0022));
+  const speed = input.run ? CFG.runSpeed : CFG.walkSpeed;
+  const fwdX = Math.sin(W.camYaw);
+  const fwdZ = Math.cos(W.camYaw);
+  const rightX = Math.cos(W.camYaw);
+  const rightZ = -Math.sin(W.camYaw);
+  let mx = fwdX * input.forward + rightX * input.strafe;
+  let mz = fwdZ * input.forward + rightZ * input.strafe;
+  const len = Math.hypot(mx, mz);
+  if (len > 0.01) {
+    mx /= len;
+    mz /= len;
+    const nx = W.playerPos.x + mx * speed * dt;
+    const nz = W.playerPos.z + mz * speed * dt;
+    const fixed = resolveBlocked(nx, nz, CFG.playerRadius);
+    W.playerPos.x = Math.max(-CFG.cityHalf - 10, Math.min(CFG.beachX + 24, fixed.x));
+    W.playerPos.z = Math.max(-CFG.cityHalf - 10, Math.min(CFG.cityHalf + 10, fixed.z));
+    W.playerYaw = Math.atan2(mx, mz);
+    W.playerSpeed = speed;
+    // Walk-cycle bob and arm swing.
+    const t = W.time * (input.run ? 13 : 9);
+    W.player.position.y = Math.abs(Math.sin(t)) * 0.07;
+    W.player.userData.armL.rotation.x = Math.sin(t) * 0.7;
+    W.player.userData.armR.rotation.x = -Math.sin(t) * 0.7;
+  } else {
+    W.playerSpeed = 0;
+    W.player.position.y = 0;
+    W.player.userData.armL.rotation.x *= 0.8;
+    W.player.userData.armR.rotation.x *= 0.8;
+  }
+  if (W.punching > 0) {
+    W.player.userData.armR.rotation.x = -1.6 * Math.sin((W.punching / 0.35) * Math.PI);
+  }
+  W.player.position.set(W.playerPos.x, W.player.position.y, W.playerPos.z);
+  W.player.rotation.y = W.playerYaw;
+}
