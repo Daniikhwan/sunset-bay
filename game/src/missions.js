@@ -1,187 +1,201 @@
-// Missions and the story of Sunset Bay: four jobs in order, each with a
-// glowing beacon on the street, an objective line on the HUD and short dialog
-// from the fixer, Marla. Finish one and the next opens; finish all four and
-// the city is yours to roam with the money banked.
-
+// Sunset Bay — missions and story. Marla the fixer hands out four jobs in
+// order; each one plants a glowing beacon in the world and a marker on the
+// minimap, and finishing one pays out and unlocks the next.
 import * as THREE from 'three';
-import { LANDMARKS, MISSIONS } from './config.js';
+import { CFG, MISSIONS } from './config.js';
+import { W, currentMission, setDialog, setObjective, addWanted } from './world.js';
+import { saveGame } from './save.js';
+import { makePedMesh } from './traffic.js';
 
-const DIALOG = {
-  intro: 'Marla: "Kid, Sunset Bay eats nobodies. Do my jobs, get paid, stay out of the cells."',
-  m1Pickup: 'Marla: "Pick up the parcel at the marina end of Bay Street. Don\'t open it."',
-  m1Deliver: 'Parcel in hand. Drop it at the south plaza — the buyer waits by the palms.',
-  m1Done: 'Marla: "Clean run. $150. You might be worth keeping around."',
-  m2Start: 'Marla: "I need wheels. Steal any car — parked or rolling — and bring it to the hideout."',
-  m2Done: 'Marla: "Nice ride. $250. The cops noticed, but that\'s your problem."',
-  m3Start: 'Marla: "The Red Jackets took our turf on Coral Row. Go clear them out. All three."',
-  m3Done: 'Marla: "Turf\'s ours again. $400. The Jackets won\'t forget this — neither will I."',
-  m4Start: 'Marla: "The big one. Hit the bank on Palm Avenue, grab the cash, lose the heat at the hideout."',
-  m4Grab: 'Cash grabbed! The alarm is screaming — get to the hideout, now!',
-  m4Done: 'Marla: "Eight hundred. You\'re not a nobody anymore, kid. Sunset Bay is yours."',
-  free: 'Story complete. Free roam — earn cash, dodge the law, own the bay.',
-};
+let beaconGroup = null;
+let beaconLight = null;
 
-export function createMissions(scene, S) {
-  const beaconMat = new THREE.MeshBasicMaterial({ color: 0xffd23e, transparent: true, opacity: 0.85 });
-  const beamMat = new THREE.MeshBasicMaterial({ color: 0xffd23e, transparent: true, opacity: 0.28 });
-  const beacon = new THREE.Mesh(new THREE.CylinderGeometry(1.4, 1.4, 0.25, 20), beaconMat);
-  const beam = new THREE.Mesh(new THREE.CylinderGeometry(1.1, 1.1, 60, 12, 1, true), beamMat);
-  beam.position.y = 30;
-  const marker = new THREE.Group();
-  marker.add(beacon);
-  marker.add(beam);
-  marker.visible = false;
-  scene.add(marker);
+export function makeBeacon(scene) {
+  const group = new THREE.Group();
+  const pillar = new THREE.Mesh(
+    new THREE.CylinderGeometry(2.2, 2.2, 60, 16, 1, true),
+    new THREE.MeshBasicMaterial({ color: 0xffd34e, transparent: true, opacity: 0.28, side: THREE.DoubleSide }),
+  );
+  pillar.position.y = 30;
+  group.add(pillar);
+  const ring = new THREE.Mesh(
+    new THREE.TorusGeometry(3, 0.25, 8, 32),
+    new THREE.MeshBasicMaterial({ color: 0xffd34e }),
+  );
+  ring.rotation.x = Math.PI / 2;
+  ring.position.y = 0.3;
+  group.add(ring);
+  const light = new THREE.PointLight(0xffd34e, 60, 40);
+  light.position.y = 4;
+  group.add(light);
+  group.visible = false;
+  scene.add(group);
+  beaconGroup = group;
+  beaconLight = light;
+  W.beacon = group;
+  return group;
+}
 
-  const state = {
-    index: S.missionIndex,
-    stage: 0,
-    objective: '',
-    enemiesLeft: 0,
-    hasParcel: false,
-    hasCash: false,
-    storyDone: S.storyDone,
-  };
+export function moveBeaconTo(x, z) {
+  if (!beaconGroup) return;
+  beaconGroup.position.set(x, 0, z);
+  beaconGroup.visible = true;
+}
 
-  function markerAt(point) {
-    marker.position.set(point.x, 0.15, point.z);
-    marker.visible = true;
+export function hideBeacon() {
+  if (beaconGroup) beaconGroup.visible = false;
+}
+
+export function startMission(index) {
+  const m = MISSIONS[index];
+  if (!m) return;
+  W.missionIndex = index;
+  W.missionActive = true;
+  W.missionStage = 0;
+  W.missionTimeLeft = m.timeLimit;
+  setDialog(m.brief, 9);
+  setObjective(`Mission ${m.id}: ${m.name} — ${m.objective}`);
+  if (m.id === 2) {
+    addWanted(3, 'mission');
+    moveBeaconTo(m.target.x, m.target.z);
+  } else if (m.id === 3) {
+    spawnRivals();
+    moveBeaconTo(m.target.x, m.target.z);
+  } else if (m.id === 4) {
+    moveBeaconTo(CFG.bank.x, CFG.bank.z);
+    spawnBankCash();
+  } else {
+    moveBeaconTo(m.target.x, m.target.z);
   }
+  if (W.audio) W.audio.pickup();
+}
 
-  function setObjective(text) {
-    state.objective = text;
-    S.hud.setObjective(text);
+export function completeMission() {
+  const m = MISSIONS[W.missionIndex];
+  if (!m) return;
+  W.missionDone[W.missionIndex] = true;
+  W.money += m.reward;
+  W.missionActive = false;
+  hideBeacon();
+  setDialog(
+    `Marla: 'Job done — $${m.reward} is yours. ${W.missionIndex < 3 ? 'Next job is on the board when you are ready.' : 'That is the whole story, kid. Sunset Bay is yours now.'}`,
+    8,
+  );
+  if (W.audio) W.audio.missionJingle();
+  saveGame();
+  if (W.missionIndex === 3) {
+    W.storyDone = true;
+    W.missionIndex = 4;
+    setObjective('Story complete — free roam Sunset Bay!');
+  } else {
+    W.missionIndex += 1;
+    setObjective(`Mission ${MISSIONS[W.missionIndex].id}: ${MISSIONS[W.missionIndex].name} — press M to start`);
   }
+}
 
-  function startMission(index) {
-    state.index = index;
-    state.stage = 0;
-    state.hasParcel = false;
-    state.hasCash = false;
-    state.enemiesLeft = 0;
-    if (index === 0) {
-      markerAt(LANDMARKS.parcelPickup);
-      setObjective('M1 Parcel Run — pick up the parcel at Bay Street');
-      S.hud.showDialog(DIALOG.m1Pickup, 5);
-    } else if (index === 1) {
-      markerAt(LANDMARKS.hideout);
-      setObjective('M2 Hot Wheels — steal a car, bring it to the hideout');
-      S.hud.showDialog(DIALOG.m2Start, 5);
-    } else if (index === 2) {
-      markerAt(LANDMARKS.turf);
-      setObjective('M3 Turf War — take back Coral Row');
-      S.hud.showDialog(DIALOG.m3Start, 5);
-    } else if (index === 3) {
-      markerAt(LANDMARKS.bank);
-      setObjective('M4 Sunset Score — hit the bank on Palm Avenue');
-      S.hud.showDialog(DIALOG.m4Start, 5);
-    }
+function spawnRivals() {
+  const spots = [
+    { x: CFG.plaza.x - 8, z: CFG.plaza.z - 6 },
+    { x: CFG.plaza.x + 9, z: CFG.plaza.z + 4 },
+    { x: CFG.plaza.x + 2, z: CFG.plaza.z - 12 },
+  ];
+  for (const s of spots) {
+    const mesh = makePedMesh(Math.random);
+    mesh.children[1].material = new THREE.MeshLambertMaterial({ color: 0x8a1a1a });
+    mesh.position.set(s.x, 0, s.z);
+    W.scene.add(mesh);
+    // A visible pistol in the rival's hand.
+    const gun = new THREE.Mesh(
+      new THREE.BoxGeometry(0.12, 0.12, 0.55),
+      new THREE.MeshLambertMaterial({ color: 0x111111 }),
+    );
+    gun.position.set(0.4, 1.15, 0.3);
+    mesh.add(gun);
+    W.enemies.push({
+      group: mesh, pos: { x: s.x, z: s.z }, yaw: 0,
+      health: 100, alive: true, shootCooldown: 1.5 + Math.random(),
+    });
   }
+}
 
-  function completeMission() {
-    const reward = MISSIONS[state.index].reward;
-    S.player.money += reward;
-    S.best = Math.max(S.best, S.player.money);
-    S.audio.jingle();
-    S.save();
-    const doneLines = [DIALOG.m1Done, DIALOG.m2Done, DIALOG.m3Done, DIALOG.m4Done];
-    S.hud.showDialog(`${doneLines[state.index]} (+$${reward})`, 5);
-    state.index += 1;
-    S.missionIndex = state.index;
-    if (state.index >= MISSIONS.length) {
-      state.storyDone = true;
-      S.storyDone = true;
-      S.save();
-      marker.visible = false;
-      setObjective(DIALOG.free);
+function spawnBankCash() {
+  const pile = new THREE.Group();
+  const green = new THREE.MeshLambertMaterial({ color: 0x2f9e5f });
+  for (let i = 0; i < 5; i++) {
+    const stack = new THREE.Mesh(new THREE.BoxGeometry(0.9, 0.25, 0.5), green);
+    stack.position.set((i % 3) * 1.1 - 1, 0.15 + Math.floor(i / 3) * 0.28, (i % 2) * 0.7);
+    stack.rotation.y = i * 0.5;
+    pile.add(stack);
+  }
+  pile.position.set(CFG.bank.x, 0, CFG.bank.z + 12);
+  W.scene.add(pile);
+  W.bankCash = pile;
+}
+
+function distTo(x, z) {
+  const px = W.onFoot ? W.playerPos.x : W.car.pos.x;
+  const pz = W.onFoot ? W.playerPos.z : W.car.pos.z;
+  return Math.hypot(px - x, pz - z);
+}
+
+export function updateMissions(dt) {
+  if (!W.missionActive || W.mode !== 'play') return;
+  const m = currentMission();
+  if (!m) return;
+  if (m.timeLimit > 0) {
+    W.missionTimeLeft -= dt;
+    if (W.missionTimeLeft <= 0) {
+      W.missionActive = false;
+      hideBeacon();
+      setDialog(`Marla: 'Too slow — the ${m.name} job fell through. Press M to try it again.'`, 7);
+      setObjective(`Mission ${m.id}: ${m.name} — press M to retry`);
       return;
     }
-    startMission(state.index);
   }
-
-  function near(point, range) {
-    const p = S.player;
-    const pos = p.car ? p.car.mesh.position : p.pos;
-    return Math.hypot(pos.x - point.x, pos.z - point.z) < range;
+  if (m.id === 1 && distTo(m.target.x, m.target.z) < 5) completeMission();
+  if (m.id === 2 && distTo(m.target.x, m.target.z) < 6) {
+    W.wanted = 0;
+    completeMission();
   }
-
-  /** E pressed near a mission point: pick up, grab, or start a fight. */
-  function tryInteract() {
-    if (state.storyDone) return;
-    const p = S.player;
-    if (state.index === 0 && state.stage === 0 && near(LANDMARKS.parcelPickup, 4) && p.onFoot) {
-      state.hasParcel = true;
-      state.stage = 1;
-      markerAt(LANDMARKS.parcelDrop);
-      setObjective('M1 Parcel Run — deliver the parcel to the south plaza');
-      S.hud.showDialog(DIALOG.m1Deliver, 4);
-      S.audio.pickup();
-    } else if (state.index === 3 && state.stage === 0 && near(LANDMARKS.bank, 5) && p.onFoot) {
-      state.hasCash = true;
-      state.stage = 1;
-      S.police.addHeat(3);
-      markerAt(LANDMARKS.hideout);
-      setObjective('M4 Sunset Score — escape to the hideout!');
-      S.hud.showDialog(DIALOG.m4Grab, 4);
-      S.audio.pickup();
-    }
+  if (m.id === 3) {
+    const alive = W.enemies.filter((e) => e.alive).length;
+    if (alive === 0 && W.enemies.length > 0) completeMission();
   }
-
-  function onEnemyDown() {
-    if (state.index !== 2 || state.storyDone) return;
-    state.enemiesLeft = Math.max(0, state.enemiesLeft - 1);
-    setObjective(`M3 Turf War — clear the crew (${state.enemiesLeft} left)`);
-    if (state.enemiesLeft === 0) completeMission();
-  }
-
-  function onCarStolen() {
-    if (state.index === 1 && state.stage === 0) {
-      state.stage = 1;
-      setObjective('M2 Hot Wheels — drive the stolen car to the hideout');
-    }
-  }
-
-  function update(dt, time) {
-    marker.rotation.y = time * 0.8;
-    beaconMat.opacity = 0.65 + Math.sin(time * 3) * 0.2;
-    if (state.storyDone || S.screen !== 'play') return;
-    if (state.index === 0 && state.stage === 1 && near(LANDMARKS.parcelDrop, 5)) {
-      completeMission();
-    } else if (state.index === 1 && state.stage === 1 && S.player.car && near(LANDMARKS.hideout, 6)) {
-      completeMission();
-    } else if (state.index === 2 && state.stage === 0 && near(LANDMARKS.turf, 8)) {
-      state.stage = 1;
-      const base = LANDMARKS.turf;
-      for (let i = 0; i < 3; i += 1) {
-        S.combat.spawnEnemy(base.x + (i - 1) * 4, base.z + (i % 2 === 0 ? 4 : -4));
+  if (m.id === 4) {
+    if (W.missionStage === 0) {
+      if (distTo(CFG.bank.x, CFG.bank.z + 12) < 4) {
+        W.missionStage = 1;
+        W.money += 0; // the cash is counted at the hideout
+        if (W.bankCash) {
+          W.scene.remove(W.bankCash);
+          W.bankCash = null;
+        }
+        addWanted(4, 'bank');
+        moveBeaconTo(CFG.hideout.x, CFG.hideout.z);
+        setDialog("Marla: 'You have the cash! Now run — every cruiser in the city is coming. Get to the hideout!'", 8);
+        setObjective('Mission 4: The Bank Job — escape to the hideout!');
+        if (W.audio) W.audio.pickup();
       }
-      state.enemiesLeft = 3;
-      setObjective('M3 Turf War — clear the crew (3 left)');
-      S.hud.showDialog('Red Jackets: "This is our corner now!"', 3);
-    } else if (state.index === 3 && state.stage === 1 && near(LANDMARKS.hideout, 6)) {
+    } else if (distTo(CFG.hideout.x, CFG.hideout.z) < 6) {
+      W.wanted = 0;
       completeMission();
     }
   }
-
-  function init() {
-    if (state.storyDone) {
-      marker.visible = false;
-      setObjective(DIALOG.free);
-    } else {
-      startMission(state.index);
-      S.hud.showDialog(DIALOG.intro, 5);
-    }
+  // Beacon pulse.
+  if (beaconGroup && beaconGroup.visible) {
+    const s = 1 + Math.sin(W.time * 4) * 0.12;
+    beaconGroup.children[1].scale.set(s, s, 1);
+    if (beaconLight) beaconLight.intensity = 50 + Math.sin(W.time * 4) * 25;
   }
+}
 
-  return {
-    state,
-    init,
-    update,
-    tryInteract,
-    onEnemyDown,
-    onCarStolen,
-    markerPoint() {
-      return marker.visible ? { x: marker.position.x, z: marker.position.z } : null;
-    },
-  };
+// M key: start (or retry) the current mission.
+export function tryStartMission() {
+  if (W.mode !== 'play') return;
+  if (W.missionActive) return;
+  if (W.storyDone) {
+    setDialog("Marla: 'No more jobs, kid — the city is yours. Go enjoy it.'", 5);
+    return;
+  }
+  startMission(W.missionIndex);
 }
