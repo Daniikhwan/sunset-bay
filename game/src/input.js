@@ -1,53 +1,96 @@
-// Keyboard and pointer input. Held keys give a steering direction; one-shot presses (start or
-// restart, pause) are queued as bit flags and taken once by the loop, so a press between two
-// frames is never lost and never counted twice.
+// Keyboard and mouse for Sunset Bay. Held keys are read every frame; one-shot
+// presses (interact, attack, weapon swap, pause, confirm) are queued as flags
+// and cleared by endFrame(), so a press between two frames is never lost and
+// never counted twice. The camera is steered by dragging with the mouse.
 
-export const ACTION_CONFIRM = 1;
-export const ACTION_PAUSE = 2;
+export const KEY_FORWARD = 'KeyW';
+export const KEY_BACK = 'KeyS';
+export const KEY_LEFT = 'KeyA';
+export const KEY_RIGHT = 'KeyD';
+export const KEY_RUN = 'ShiftLeft';
+export const KEY_INTERACT = 'KeyE';
+export const KEY_WEAPON = 'KeyQ';
+export const KEY_PUNCH = 'KeyF';
+export const KEY_PAUSE = 'KeyP';
+export const KEY_CONFIRM = 'Space';
 
-const LEFT = new Set(['ArrowLeft', 'KeyA']);
-const RIGHT = new Set(['ArrowRight', 'KeyD']);
-const CONFIRM = new Set(['Space', 'Enter']);
-const PAUSE = new Set(['KeyP', 'Escape']);
-
-export function createInput(target) {
-  let left = false;
-  let right = false;
-  let actions = 0;
+export function createInput(canvas) {
+  const held = new Set();
+  let lookDX = 0;
+  let lookDY = 0;
+  let dragging = false;
+  let lastX = 0;
+  let lastY = 0;
+  const pressed = {
+    interact: false,
+    punch: false,
+    attack: false,
+    weapon: false,
+    pause: false,
+    confirm: false,
+  };
 
   window.addEventListener('keydown', (event) => {
-    if (LEFT.has(event.code)) left = true;
-    else if (RIGHT.has(event.code)) right = true;
-    else if (CONFIRM.has(event.code)) {
-      if (!event.repeat) actions |= ACTION_CONFIRM;
-    } else if (PAUSE.has(event.code)) {
-      if (!event.repeat) actions |= ACTION_PAUSE;
-    } else return;
-    event.preventDefault();
+    if (event.code === KEY_INTERACT && !event.repeat) pressed.interact = true;
+    if (event.code === KEY_PUNCH && !event.repeat) pressed.punch = true;
+    if (event.code === KEY_WEAPON && !event.repeat) pressed.weapon = true;
+    if ((event.code === KEY_PAUSE || event.code === 'Escape') && !event.repeat) pressed.pause = true;
+    if ((event.code === KEY_CONFIRM || event.code === 'Enter') && !event.repeat) pressed.confirm = true;
+    held.add(event.code);
+    if (['Space', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(event.code)) event.preventDefault();
   });
   window.addEventListener('keyup', (event) => {
-    if (LEFT.has(event.code)) left = false;
-    else if (RIGHT.has(event.code)) right = false;
+    held.delete(event.code);
   });
-  // A key released while the tab is hidden never sends keyup: let go of everything on blur.
   window.addEventListener('blur', () => {
-    left = false;
-    right = false;
+    held.clear();
+    dragging = false;
   });
-  target.addEventListener('pointerdown', () => {
-    actions |= ACTION_CONFIRM;
+
+  canvas.addEventListener('mousedown', (event) => {
+    dragging = true;
+    lastX = event.clientX;
+    lastY = event.clientY;
+    if (event.button === 0) pressed.attack = true;
+  });
+  window.addEventListener('mousemove', (event) => {
+    if (!dragging) return;
+    lookDX += event.clientX - lastX;
+    lookDY += event.clientY - lastY;
+    lastX = event.clientX;
+    lastY = event.clientY;
+  });
+  window.addEventListener('mouseup', () => {
+    dragging = false;
   });
 
   return {
-    /** -1 for left, 1 for right, 0 for neither or both. */
-    direction() {
-      return (right ? 1 : 0) - (left ? 1 : 0);
+    held(code) {
+      return held.has(code);
     },
-    /** The one-shot presses since the last call, as ACTION_* flags. */
-    takeActions() {
-      const taken = actions;
-      actions = 0;
-      return taken;
+    /** Forward/back/strafe as -1, 0 or 1, from WASD or the arrow keys. */
+    move() {
+      const f = (held.has(KEY_FORWARD) || held.has('ArrowUp') ? 1 : 0) - (held.has(KEY_BACK) || held.has('ArrowDown') ? 1 : 0);
+      const s = (held.has(KEY_RIGHT) || held.has('ArrowRight') ? 1 : 0) - (held.has(KEY_LEFT) || held.has('ArrowLeft') ? 1 : 0);
+      return { forward: f, strafe: s, run: held.has(KEY_RUN) || held.has('ShiftRight') };
+    },
+    /** Mouse drag since the last call, in pixels; calling it consumes it. */
+    takeLook() {
+      const out = { dx: lookDX, dy: lookDY };
+      lookDX = 0;
+      lookDY = 0;
+      return out;
+    },
+    take(name) {
+      const value = pressed[name] === true;
+      pressed[name] = false;
+      return value;
+    },
+    /** Clear every one-shot flag at the end of a frame. */
+    endFrame() {
+      for (const key of Object.keys(pressed)) pressed[key] = false;
+      lookDX = 0;
+      lookDY = 0;
     },
   };
 }
