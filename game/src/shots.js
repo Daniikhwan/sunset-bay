@@ -1,79 +1,131 @@
-// The screenshot scenes behind ?shot=start|play|end. Each one plays the real rules forward from a
-// fresh world for a fixed number of steps, steered by a simple autopilot (look ahead each way the
-// paddle could move, keep clear of blocks, chase the lowest coin when that is safe), so the frame
-// is what a short game really looks like and the same seed always gives the same frame.
-import { FIELD, PLAYER, STEP } from './config.js';
-import { EVENT_OVER, KIND_BLOCK } from './world.js';
-import { SCREEN_OVER, SCREEN_PLAY, SCREEN_TITLE } from './render.js';
+// The screenshot scenes behind ?shot=start|play|chase|end. Each one stages the
+// real game — the same world, traffic, police and missions the player gets —
+// and plays it forward from a fixed seed with a simple autopilot, so the
+// frame is what a short session really looks like and the same seed always
+// gives the same frame. The caller renders the staged state twice and sets
+// window.__shotReady.
 
-const START_SECONDS = 5;
-const PLAY_SECONDS = 26;
-const END_LIMIT_SECONDS = 600;
-/**
- * How far ahead, in seconds, the autopilot checks each way it could move: the play scene's pilot
- * looks well ahead and keeps all its lives; the end scene's looks only a moment ahead, so it is
- * caught out once the blocks speed up, as a hurried player is.
- */
-const HORIZON_PLAY = 0.7;
-const HORIZON_END = 0.25;
-const SAMPLE = 1 / 30;
-const DIRECTIONS = [0, -1, 1];
-/** Extra room, each side, it keeps between the paddle and a block. */
-const MARGIN = 10;
+import { LANDMARKS, STEP } from './config.js';
 
-/** Seconds until moving in `direction` (-1, 0, 1) runs the paddle into a block; Infinity when it never does. */
-function timeToHit(state, direction, horizon) {
-  const player = state.player;
-  for (let t = SAMPLE; t <= horizon; t += SAMPLE) {
-    const x = Math.min(FIELD.width - player.width, Math.max(0, player.x + direction * PLAYER.speed * t));
-    for (let index = 0; index < state.items.length; index += 1) {
-      const item = state.items[index];
-      if (!item.active || item.kind !== KIND_BLOCK) continue;
-      const y = item.y + item.speed * t;
-      if (y + item.height > player.y && y < player.y + player.height && item.x < x + player.width + MARGIN && item.x + item.width > x - MARGIN) return t;
-    }
-  }
-  return Infinity;
+const IDLE_SECONDS = 4;
+const PLAY_SECONDS = 9;
+const CHASE_SECONDS = 5;
+
+function normAngle(a) {
+  while (a > Math.PI) a -= Math.PI * 2;
+  while (a < -Math.PI) a += Math.PI * 2;
+  return a;
 }
 
-/** Of the safe ways to move, the one toward the lowest coin (or the centre); else the one that is hit last. */
-function autopilot(state, horizon) {
-  const player = state.player;
-  let coin = null;
-  for (let index = 0; index < state.items.length; index += 1) {
-    const item = state.items[index];
-    if (item.active && item.kind !== KIND_BLOCK && (coin === null || item.y > coin.y)) coin = item;
-  }
-  const target = coin === null ? FIELD.width / 2 : coin.x + coin.width / 2;
-  const centre = player.x + player.width / 2;
-  const wanted = target > centre + 8 ? 1 : target < centre - 8 ? -1 : 0;
-  let best = wanted;
-  let bestTime = timeToHit(state, wanted, horizon);
-  for (let index = 0; index < DIRECTIONS.length && bestTime !== Infinity; index += 1) {
-    const time = timeToHit(state, DIRECTIONS[index], horizon);
-    if (time > bestTime) {
-      bestTime = time;
-      best = DIRECTIONS[index];
-    }
-  }
-  return best;
+/** Steer a car through road waypoints toward a point, flooring it. */
+function driveRoute(S, car, waypoints, dt) {
+  const target = waypoints[0];
+  const dx = target.x - car.mesh.position.x;
+  const dz = target.z - car.mesh.position.z;
+  if (Math.hypot(dx, dz) < 6 && waypoints.length > 1) waypoints.shift();
+  const want = Math.atan2(dx, dz);
+  const dh = normAngle(want - car.heading);
+  const steer = Math.max(-1, Math.min(1, dh * 1.6));
+  S.vehicles.drive(car, dt, 1, steer);
 }
 
-/**
- * Set `world` to the named scene (start, play or end; any other name is start) and return the
- * screen to draw over it and the best score to show.
- */
-export function stageShot(name, world) {
-  world.reset();
-  if (name !== 'play' && name !== 'end') {
-    for (let index = 0; index < START_SECONDS / STEP; index += 1) world.step(STEP, 0, true);
-    return { screen: SCREEN_TITLE, best: 0 };
+/** Steer a car toward a point and floor it. */
+function driveToward(S, car, tx, tz, dt) {
+  driveRoute(S, car, [{ x: tx, z: tz }], dt);
+}
+
+function stepWorld(S, dt) {
+  S.time += dt;
+  S.city.update(dt, S.time);
+  S.traffic.update(dt);
+  S.police.update(dt);
+  S.combat.update(dt);
+  S.missions.update(dt, S.time);
+  S.vehicles.update(dt);
+}
+
+function syncPlayerToCar(S) {
+  if (S.player.car) S.player.pos.copy(S.player.car.mesh.position);
+}
+
+export function stageShot(name, S) {
+  S.screen = 'play';
+  if (name === 'start') {
+    S.screen = 'title';
+    for (let i = 0; i < IDLE_SECONDS / STEP; i += 1) {
+      S.time += STEP;
+      S.city.update(STEP, S.time);
+      S.traffic.update(STEP);
+    }
+    // The cover frame: the title over a living city, with the HUD, a couple
+    // of wanted stars, the mission objective and a cruiser in view, so one
+    // image shows the whole game at once.
+    S.wanted = 2;
+    S.vehicles.spawnCar('police', 12, 44, Math.PI, { driver: 'npc' });
+    S.hud.setScreen('title', { best: S.best });
+    document.getElementById('hud').style.display = 'block';
+    return { screen: 'title', establishing: true };
   }
-  const limit = name === 'end' ? END_LIMIT_SECONDS : PLAY_SECONDS;
-  const horizon = name === 'end' ? HORIZON_END : HORIZON_PLAY;
-  for (let index = 0; index < limit / STEP; index += 1) {
-    if (world.step(STEP, autopilot(world.state, horizon), false) & EVENT_OVER) break;
+
+  if (name === 'chase') {
+    // Clear the chase road so the pursuit reads as a pursuit, not a pile-up.
+    for (const car of [...S.cars]) {
+      if (car.kind === 'civil' && car.driver === 'npc' && Math.abs(car.mesh.position.x) < 12 && car.mesh.position.z > -130 && car.mesh.position.z < 40) {
+        S.vehicles.removeCar(car);
+      }
+    }
+    const car = S.vehicles.spawnCar('civil', 0, 30, Math.PI, { driver: 'player' });
+    S.playerCtl.enterCar(car);
+    car.speed = 24;
+    S.wanted = 3;
+    S.player.money = 400;
+    const cop1 = S.vehicles.spawnCar('police', -4, 52, Math.PI, { driver: 'npc' });
+    cop1.speed = 26;
+    const cop2 = S.vehicles.spawnCar('police', 5, 58, Math.PI, { driver: 'npc' });
+    cop2.speed = 24;
+    for (let i = 0; i < CHASE_SECONDS / STEP; i += 1) {
+      const t = i * STEP;
+      // Weave gently down Bay Street while the cruisers close in.
+      const target = { x: Math.sin(t * 0.7) * 3, z: -120 };
+      driveToward(S, car, target.x, target.z, STEP);
+      stepWorld(S, STEP);
+      syncPlayerToCar(S);
+    }
+    S.hud.setScreen('play');
+    S.hud.setObjective('M4 Sunset Score — escape to the hideout!');
+    S.hud.showDialog('Marla: "Lose them at the hideout — do NOT get busted!"', 10);
+    return { screen: 'play' };
   }
-  const over = world.state.lives === 0;
-  return { screen: over ? SCREEN_OVER : SCREEN_PLAY, best: world.state.score };
+
+  if (name === 'end') {
+    S.screen = 'over';
+    S.overReason = 'wasted';
+    S.player.health = 0;
+    S.player.money = 650;
+    const cop = S.vehicles.spawnCar('police', 6, 30, Math.PI, { driver: 'npc' });
+    cop.speed = 0;
+    for (let i = 0; i < 2 / STEP; i += 1) {
+      S.time += STEP;
+      S.city.update(STEP, S.time);
+      S.traffic.update(STEP);
+    }
+    S.hud.setScreen('over', { reason: 'wasted', money: S.player.money, best: Math.max(S.best, S.player.money) });
+    return { screen: 'over' };
+  }
+
+  // 'play' (and anything else): driving to the first pickup, mission live.
+  // The route stays on the roads: north up Bay Street, then west to the marina.
+  const car = S.vehicles.spawnCar('civil', 0, 80, Math.PI, { driver: 'player' });
+  S.playerCtl.enterCar(car);
+  S.player.money = 150;
+  const route = [{ x: 0, z: -60 }, { x: LANDMARKS.parcelPickup.x, z: LANDMARKS.parcelPickup.z }];
+  for (let i = 0; i < PLAY_SECONDS / STEP; i += 1) {
+    driveRoute(S, car, route, STEP);
+    stepWorld(S, STEP);
+    syncPlayerToCar(S);
+  }
+  S.hud.setScreen('play');
+  S.hud.setObjective('M1 Parcel Run — pick up the parcel at Bay Street');
+  S.hud.showDialog('Marla: "Pick up the parcel at the marina end of Bay Street."', 10);
+  return { screen: 'play' };
 }
