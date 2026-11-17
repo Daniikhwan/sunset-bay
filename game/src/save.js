@@ -1,46 +1,31 @@
-// Sunset Bay — save and load. Progress (money, missions finished, best
-// wanted level survived) lives in localStorage and is restored on boot.
-import { W } from './world.js';
+// Progress between visits: cash, finished jobs and the best haul. One key
+// in localStorage; a missing or corrupt entry just means a fresh start.
 
-const KEY = 'sunset-bay-save-v1';
+import { SAVE_KEY } from './config.js';
 
-export function saveGame() {
+export function loadSave() {
   try {
-    const data = {
-      money: W.money,
-      missionIndex: W.missionIndex,
-      missionDone: W.missionDone,
-      storyDone: W.storyDone,
-      savedAt: Date.now(),
-    };
-    localStorage.setItem(KEY, JSON.stringify(data));
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-export function loadGame() {
-  try {
-    const raw = localStorage.getItem(KEY);
-    if (!raw) return null;
+    const raw = window.localStorage.getItem(SAVE_KEY);
+    if (!raw) return { cash: 0, jobs: 0, best: 0 };
     const data = JSON.parse(raw);
-    if (typeof data.money !== 'number') return null;
-    W.money = data.money;
-    W.missionIndex = data.missionIndex | 0;
-    if (Array.isArray(data.missionDone)) W.missionDone = data.missionDone.slice(0, 4);
-    W.storyDone = !!data.storyDone;
-    if (W.missionIndex >= 4) W.storyDone = true;
-    return data;
+    return {
+      cash: Number(data.cash) || 0,
+      jobs: Number(data.jobs) || 0,
+      best: Number(data.best) || 0,
+    };
   } catch {
-    return null;
+    return { cash: 0, jobs: 0, best: 0 };
   }
 }
 
-export function clearSave() {
+export function saveGame(data) {
   try {
-    localStorage.removeItem(KEY);
+    window.localStorage.setItem(SAVE_KEY, JSON.stringify({
+      cash: data.cash || 0,
+      jobs: data.jobs || 0,
+      best: data.best || 0,
+    }));
   } catch {
-    // Storage unavailable — the game still plays, it just cannot persist.
+    // Storage can be off (private windows): the run still counts.
   }
 }
