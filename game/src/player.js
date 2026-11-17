@@ -1,84 +1,146 @@
-// Sunset Bay — the player on foot: the character mesh, WASD movement
-// relative to the camera, sprinting, and the third-person camera rig that
-// follows from behind with mouse-look (pointer lock).
-import * as THREE from 'three';
-import { CFG } from './config.js';
-import { W } from './world.js';
-import { resolveBlocked } from './city.js';
-import { mouse } from './input.js';
+// The player on foot: a box-built person who walks, sprints, punches and
+// shoots, and climbs in and out of cars. While driving the person is hidden
+// inside the car. The heading is the aim direction (mouse look sets it);
+// WASD moves relative to it, GTA style.
 
-export function makePlayerMesh() {
+import * as THREE from '../vendor/three.module.min.js';
+import { ON_FOOT, PALETTE } from './config.js';
+import { resolveCollision } from './city.js';
+
+const boxGeo = new THREE.BoxGeometry(1, 1, 1);
+const headGeo = new THREE.SphereGeometry(0.26, 12, 10);
+
+export function createPlayer(scene, x, z) {
   const group = new THREE.Group();
-  const jacket = new THREE.MeshLambertMaterial({ color: 0xff5a3c });
-  const jeans = new THREE.MeshLambertMaterial({ color: 0x2c4a6e });
-  const skin = new THREE.MeshLambertMaterial({ color: 0xe0ac69 });
-  const legs = new THREE.Mesh(new THREE.BoxGeometry(0.44, 0.82, 0.28), jeans);
-  legs.position.y = 0.41;
-  legs.castShadow = true;
-  group.add(legs);
-  const torso = new THREE.Mesh(new THREE.BoxGeometry(0.58, 0.66, 0.34), jacket);
+  const skin = new THREE.MeshLambertMaterial({ color: 0xd8a077 });
+  const shirt = new THREE.MeshLambertMaterial({ color: PALETTE.player });
+  const pants = new THREE.MeshLambertMaterial({ color: 0x2c3e50 });
+
+  const torso = new THREE.Mesh(boxGeo, shirt);
+  torso.scale.set(0.72, 0.85, 0.4);
   torso.position.y = 1.15;
-  torso.castShadow = true;
   group.add(torso);
-  const head = new THREE.Mesh(new THREE.SphereGeometry(0.27, 12, 10), skin);
-  head.position.y = 1.72;
-  head.castShadow = true;
+  const head = new THREE.Mesh(headGeo, skin);
+  head.position.y = 1.78;
   group.add(head);
-  // Sunset cap.
-  const cap = new THREE.Mesh(
-    new THREE.CylinderGeometry(0.28, 0.29, 0.1, 12),
-    new THREE.MeshLambertMaterial({ color: 0xf2c14e }),
+  const legL = new THREE.Mesh(boxGeo, pants);
+  legL.scale.set(0.28, 0.75, 0.32);
+  legL.position.set(-0.18, 0.38, 0);
+  group.add(legL);
+  const legR = new THREE.Mesh(boxGeo, pants);
+  legR.scale.set(0.28, 0.75, 0.32);
+  legR.position.set(0.18, 0.38, 0);
+  group.add(legR);
+  const armL = new THREE.Mesh(boxGeo, shirt);
+  armL.scale.set(0.2, 0.7, 0.24);
+  armL.position.set(-0.48, 1.18, 0);
+  group.add(armL);
+  const armR = new THREE.Mesh(boxGeo, shirt);
+  armR.scale.set(0.2, 0.7, 0.24);
+  armR.position.set(0.48, 1.18, 0);
+  group.add(armR);
+  const gun = new THREE.Mesh(boxGeo, new THREE.MeshLambertMaterial({ color: 0x1a1a1a }));
+  gun.scale.set(0.1, 0.12, 0.5);
+  gun.position.set(0.48, 1.15, -0.35);
+  gun.visible = false;
+  group.add(gun);
+  const shadow = new THREE.Mesh(
+    new THREE.CircleGeometry(0.55, 16),
+    new THREE.MeshBasicMaterial({ color: 0x000000, transparent: true, opacity: 0.3 }),
   );
-  cap.position.y = 1.92;
-  group.add(cap);
-  for (const ax of [-0.36, 0.36]) {
-    const arm = new THREE.Mesh(new THREE.BoxGeometry(0.14, 0.62, 0.14), jacket);
-    arm.position.set(ax, 1.12, 0);
-    arm.castShadow = true;
-    group.add(arm);
-  }
-  group.userData.armL = group.children[4];
-  group.userData.armR = group.children[5];
-  return group;
+  shadow.rotation.x = -Math.PI / 2;
+  shadow.position.y = 0.02;
+  group.add(shadow);
+
+  scene.add(group);
+  const player = {
+    pos: new THREE.Vector3(x, 0, z),
+    heading: 0,
+    speed: 0,
+    health: ON_FOOT.health,
+    cash: 0,
+    pistol: false,
+    ammo: 12,
+    onFoot: true,
+    car: null,
+    punchTimer: 0,
+    reloadTimer: 0,
+    invuln: 0,
+    walkPhase: 0,
+    group,
+    legL,
+    legR,
+    armL,
+    armR,
+    gun,
+  };
+  syncPlayer(player);
+  return player;
 }
 
-export function updatePlayer(dt, input) {
-  if (!W.onFoot || W.mode !== 'play') return;
-  // Mouse look: yaw follows the mouse, pitch clamps.
-  W.camYaw -= mouse.dx * 0.0028;
-  W.camPitch = Math.max(-1.1, Math.min(0.35, W.camPitch - mouse.dy * 0.0022));
-  const speed = input.run ? CFG.runSpeed : CFG.walkSpeed;
-  const fwdX = Math.sin(W.camYaw);
-  const fwdZ = Math.cos(W.camYaw);
-  const rightX = Math.cos(W.camYaw);
-  const rightZ = -Math.sin(W.camYaw);
-  let mx = fwdX * input.forward + rightX * input.strafe;
-  let mz = fwdZ * input.forward + rightZ * input.strafe;
-  const len = Math.hypot(mx, mz);
-  if (len > 0.01) {
-    mx /= len;
-    mz /= len;
-    const nx = W.playerPos.x + mx * speed * dt;
-    const nz = W.playerPos.z + mz * speed * dt;
-    const fixed = resolveBlocked(nx, nz, CFG.playerRadius);
-    W.playerPos.x = Math.max(-CFG.cityHalf - 10, Math.min(CFG.beachX + 24, fixed.x));
-    W.playerPos.z = Math.max(-CFG.cityHalf - 10, Math.min(CFG.cityHalf + 10, fixed.z));
-    W.playerYaw = Math.atan2(mx, mz);
-    W.playerSpeed = speed;
-    // Walk-cycle bob and arm swing.
-    const t = W.time * (input.run ? 13 : 9);
-    W.player.position.y = Math.abs(Math.sin(t)) * 0.07;
-    W.player.userData.armL.rotation.x = Math.sin(t) * 0.7;
-    W.player.userData.armR.rotation.x = -Math.sin(t) * 0.7;
-  } else {
-    W.playerSpeed = 0;
-    W.player.position.y = 0;
-    W.player.userData.armL.rotation.x *= 0.8;
-    W.player.userData.armR.rotation.x *= 0.8;
-  }
-  if (W.punching > 0) {
-    W.player.userData.armR.rotation.x = -1.6 * Math.sin((W.punching / 0.35) * Math.PI);
-  }
-  W.player.position.set(W.playerPos.x, W.player.position.y, W.playerPos.z);
-  W.player.rotation.y = W.playerYaw;
+/** Place the person's meshes where its data says it is. */
+export function syncPlayer(player) {
+  player.group.position.copy(player.pos);
+  player.group.rotation.y = player.heading;
+  player.group.visible = player.onFoot;
+  player.gun.visible = player.onFoot && player.pistol;
+  const swing = Math.sin(player.walkPhase) * 0.5 * Math.min(1, player.speed / 6);
+  player.legL.rotation.x = swing;
+  player.legR.rotation.x = -swing;
+  player.armL.rotation.x = -swing * 0.7;
+  player.armR.rotation.x = player.pistol ? -1.35 : swing * 0.7;
+}
+
+/**
+ * One step on foot. `move` is {forward, right} in -1..1, `sprint` is a
+ * boolean; the heading is already set by the mouse. Returns nothing.
+ */
+export function stepOnFoot(player, move, sprint, dt, colliders) {
+  const target = sprint ? ON_FOOT.sprint : ON_FOOT.walk;
+  const want = Math.hypot(move.forward, move.right) > 0 ? target : 0;
+  player.speed += (want - player.speed) * Math.min(1, dt * 6);
+  if (player.speed < 0.05) player.speed = 0;
+  const fx = Math.sin(player.heading);
+  const fz = Math.cos(player.heading);
+  const rx = Math.cos(player.heading);
+  const rz = -Math.sin(player.heading);
+  const mx = fx * move.forward + rx * move.right;
+  const mz = fz * move.forward + rz * move.right;
+  const len = Math.hypot(mx, mz) || 1;
+  const nx = player.pos.x + (mx / len) * player.speed * dt;
+  const nz = player.pos.z + (mz / len) * player.speed * dt;
+  const hit = resolveCollision(nx, nz, 0.55, colliders);
+  player.pos.x = hit.x;
+  player.pos.z = hit.z;
+  player.pos.y = 0;
+  player.walkPhase += player.speed * dt * 1.6;
+  if (player.punchTimer > 0) player.punchTimer -= dt;
+  if (player.reloadTimer > 0) player.reloadTimer -= dt;
+  if (player.invuln > 0) player.invuln -= dt;
+  syncPlayer(player);
+}
+
+/** Put the player beside a car (driver's side) and take the wheel. */
+export function enterCar(player, car) {
+  player.car = car;
+  player.onFoot = false;
+  car.driver = true;
+  car.speed = 0;
+  syncPlayer(player);
+}
+
+/** Step out of the car, on its left side. */
+export function exitCar(player) {
+  const car = player.car;
+  if (!car) return;
+  car.driver = false;
+  car.speed = 0;
+  const sx = Math.cos(car.heading);
+  const sz = -Math.sin(car.heading);
+  player.pos.set(car.pos.x + sx * 2.2, 0, car.pos.z + sz * 2.2);
+  player.heading = car.heading;
+  player.car = null;
+  player.onFoot = true;
+  player.speed = 0;
+  syncPlayer(player);
 }
