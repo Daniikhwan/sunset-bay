@@ -1,131 +1,173 @@
-// The screenshot scenes behind ?shot=start|play|chase|end. Each one stages the
-// real game — the same world, traffic, police and missions the player gets —
-// and plays it forward from a fixed seed with a simple autopilot, so the
-// frame is what a short session really looks like and the same seed always
-// gives the same frame. The caller renders the staged state twice and sets
-// window.__shotReady.
+// Sunset Bay — deterministic screenshot scenes. ?shot=start|play|chase|end
+// stages a fixed situation from a fixed seed, runs the real simulation for a
+// couple of seconds, then sets window.__shotReady so the screenshot driver
+// knows the frame is ready. Nothing here is faked: the city, the traffic,
+// the police and the HUD are the same code the player gets.
+import * as THREE from 'three';
+import { CFG, MISSIONS, mulberry32 } from './config.js';
+import { W, setDialog, setObjective, currentMission } from './world.js';
+import { spawnTrafficCar } from './vehicles.js';
+import { spawnPed } from './traffic.js';
+import { spawnCopCar, spawnFootCop } from './police.js';
+import { startMission, moveBeaconTo } from './missions.js';
+import { showScreen } from './hud.js';
 
-import { LANDMARKS, STEP } from './config.js';
-
-const IDLE_SECONDS = 4;
-const PLAY_SECONDS = 9;
-const CHASE_SECONDS = 5;
-
-function normAngle(a) {
-  while (a > Math.PI) a -= Math.PI * 2;
-  while (a < -Math.PI) a += Math.PI * 2;
-  return a;
+function clearDynamic(scene) {
+  for (const car of W.cars) scene.remove(car.group);
+  for (const ped of W.peds) scene.remove(ped.group);
+  for (const cop of W.cops) scene.remove(cop.group);
+  for (const cop of W.footCops) scene.remove(cop.group);
+  for (const e of W.enemies) scene.remove(e.group);
+  W.cars = [];
+  W.peds = [];
+  W.cops = [];
+  W.footCops = [];
+  W.enemies = [];
 }
 
-/** Steer a car through road waypoints toward a point, flooring it. */
-function driveRoute(S, car, waypoints, dt) {
-  const target = waypoints[0];
-  const dx = target.x - car.mesh.position.x;
-  const dz = target.z - car.mesh.position.z;
-  if (Math.hypot(dx, dz) < 6 && waypoints.length > 1) waypoints.shift();
-  const want = Math.atan2(dx, dz);
-  const dh = normAngle(want - car.heading);
-  const steer = Math.max(-1, Math.min(1, dh * 1.6));
-  S.vehicles.drive(car, dt, 1, steer);
+// Park a few extra cars and pedestrians around a point for a busy street.
+function dressStreet(scene, rng, cx, cz) {
+  for (let i = 0; i < 4; i++) {
+    const car = spawnTrafficCar(scene, rng);
+    car.pos.x = cx + (rng() - 0.5) * 60;
+    car.pos.z = cz + (rng() - 0.5) * 60;
+    car.group.position.set(car.pos.x, 0, car.pos.z);
+  }
+  for (let i = 0; i < 8; i++) {
+    spawnPed(scene, rng, cx + (rng() - 0.5) * 50, cz + (rng() - 0.5) * 50);
+  }
 }
 
-/** Steer a car toward a point and floor it. */
-function driveToward(S, car, tx, tz, dt) {
-  driveRoute(S, car, [{ x: tx, z: tz }], dt);
+function putPlayerInCar(carIndex = 0) {
+  const car = W.cars[carIndex];
+  if (!car) return;
+  car.npc = false;
+  car.parked = false;
+  car.speed = 18;
+  W.car = car;
+  W.onFoot = false;
+  W.carSpeed = 18;
+  W.player.visible = false;
+  return car;
 }
 
-function stepWorld(S, dt) {
-  S.time += dt;
-  S.city.update(dt, S.time);
-  S.traffic.update(dt);
-  S.police.update(dt);
-  S.combat.update(dt);
-  S.missions.update(dt, S.time);
-  S.vehicles.update(dt);
-}
+export function stageShot(name, scene) {
+  const rng = mulberry32(90210);
+  clearDynamic(scene);
+  W.shot = name;
+  W.started = true;
+  W.mode = 'play';
+  W.health = 100;
+  W.ammo = 36;
 
-function syncPlayerToCar(S) {
-  if (S.player.car) S.player.pos.copy(S.player.car.mesh.position);
-}
-
-export function stageShot(name, S) {
-  S.screen = 'play';
   if (name === 'start') {
-    S.screen = 'title';
-    for (let i = 0; i < IDLE_SECONDS / STEP; i += 1) {
-      S.time += STEP;
-      S.city.update(STEP, S.time);
-      S.traffic.update(STEP);
-    }
-    // The cover frame: the title over a living city, with the HUD, a couple
-    // of wanted stars, the mission objective and a cruiser in view, so one
-    // image shows the whole game at once.
-    S.wanted = 2;
-    S.vehicles.spawnCar('police', 12, 44, Math.PI, { driver: 'npc' });
-    S.hud.setScreen('title', { best: S.best });
+    // Cover: title screen over a living city, HUD + minimap + wanted stars
+    // + mission objective + Marla's dialog all visible at once.
+    W.mode = 'title';
+    W.money = 1250;
+    W.wanted = 2;
+    W.sinceCrime = 0;
+    W.missionIndex = 0;
+    W.missionActive = true;
+    W.missionTimeLeft = 98;
+    setObjective('Mission 1: The Package — Deliver the package to the docks beacon');
+    setDialog(MISSIONS[0].brief, 999);
+    W.playerPos = { x: 2, z: 30 };
+    W.playerYaw = Math.PI * 0.9;
+    W.camYaw = Math.PI * 0.9;
+    W.player.position.set(2, 0, 30);
+    W.player.visible = true;
+    dressStreet(scene, rng, 0, 20);
+    moveBeaconTo(CFG.delivery.x, CFG.delivery.z);
+    spawnCopCar(scene, rng);
+    W.cops[0].pos = { x: -18, z: 44 };
+    W.cops[0].group.position.set(-18, 0, 44);
+    showScreen('title');
+    // The cover shows the title AND the HUD at once.
     document.getElementById('hud').style.display = 'block';
-    return { screen: 'title', establishing: true };
-  }
-
-  if (name === 'chase') {
-    // Clear the chase road so the pursuit reads as a pursuit, not a pile-up.
-    for (const car of [...S.cars]) {
-      if (car.kind === 'civil' && car.driver === 'npc' && Math.abs(car.mesh.position.x) < 12 && car.mesh.position.z > -130 && car.mesh.position.z < 40) {
-        S.vehicles.removeCar(car);
-      }
-    }
-    const car = S.vehicles.spawnCar('civil', 0, 30, Math.PI, { driver: 'player' });
-    S.playerCtl.enterCar(car);
-    car.speed = 24;
-    S.wanted = 3;
-    S.player.money = 400;
-    const cop1 = S.vehicles.spawnCar('police', -4, 52, Math.PI, { driver: 'npc' });
+  } else if (name === 'play') {
+    // Driving through the avenue on mission 1, package in the trunk.
+    W.money = 1250;
+    W.wanted = 0;
+    W.missionIndex = 0;
+    W.missionActive = true;
+    W.missionTimeLeft = 87;
+    setObjective('Mission 1: The Package — Deliver the package to the docks beacon');
+    setDialog("Marla: 'Take the avenue east, then cut south. The docks beacon is lit — you cannot miss it.'", 999);
+    dressStreet(scene, rng, 0, 0);
+    const car = putPlayerInCar(0);
+    car.pos = { x: -30, z: 0 };
+    car.yaw = Math.PI / 2;
+    car.group.position.set(-30, 0, 0);
+    car.group.rotation.y = car.yaw;
+    moveBeaconTo(CFG.delivery.x, CFG.delivery.z);
+    W.autopilot = true;
+    showScreen(null);
+  } else if (name === 'chase') {
+    // Wanted 4, two cruisers on the tail, mission 2 escape in progress.
+    W.money = 2050;
+    W.wanted = 4;
+    W.sinceCrime = 0;
+    W.missionIndex = 1;
+    W.missionActive = true;
+    W.missionTimeLeft = 112;
+    setObjective('Mission 2: Hot Wheels — Escape the police — reach the hideout');
+    setDialog("Marla: 'They are all over you! Lose them and get to the hideout — do not stop!'", 999);
+    dressStreet(scene, rng, 40, 40);
+    const car = putPlayerInCar(0);
+    car.pos = { x: 40, z: 40 };
+    car.yaw = -Math.PI / 2;
+    car.group.position.set(40, 0, 40);
+    car.group.rotation.y = car.yaw;
+    car.speed = 26;
+    W.carSpeed = 26;
+    // Two cruisers ahead in the lanes, closing in as the player bears down
+    // on them: they stay inside the chase camera's view at the capture.
+    W.autopilotSpeed = 26;
+    const cop1 = spawnCopCar(scene, rng);
+    cop1.staged = true;
+    cop1.pos = { x: -20, z: 46 };
+    cop1.yaw = -Math.PI / 2;
     cop1.speed = 26;
-    const cop2 = S.vehicles.spawnCar('police', 5, 58, Math.PI, { driver: 'npc' });
-    cop2.speed = 24;
-    for (let i = 0; i < CHASE_SECONDS / STEP; i += 1) {
-      const t = i * STEP;
-      // Weave gently down Bay Street while the cruisers close in.
-      const target = { x: Math.sin(t * 0.7) * 3, z: -120 };
-      driveToward(S, car, target.x, target.z, STEP);
-      stepWorld(S, STEP);
-      syncPlayerToCar(S);
-    }
-    S.hud.setScreen('play');
-    S.hud.setObjective('M4 Sunset Score — escape to the hideout!');
-    S.hud.showDialog('Marla: "Lose them at the hideout — do NOT get busted!"', 10);
-    return { screen: 'play' };
+    cop1.group.position.set(-20, 0, 46);
+    cop1.group.rotation.y = cop1.yaw;
+    const cop2 = spawnCopCar(scene, rng);
+    cop2.staged = true;
+    cop2.pos = { x: -30, z: 33 };
+    cop2.yaw = -Math.PI / 2;
+    cop2.speed = 26;
+    cop2.group.position.set(-30, 0, 33);
+    cop2.group.rotation.y = cop2.yaw;
+    moveBeaconTo(CFG.hideout.x, CFG.hideout.z);
+    W.autopilot = true;
+    showScreen(null);
+  } else if (name === 'end') {
+    // Story complete: the bank job paid off, player at the hideout at dusk.
+    W.money = 5000;
+    W.wanted = 0;
+    W.storyDone = true;
+    W.missionIndex = 4;
+    W.missionActive = false;
+    W.missionDone = [true, true, true, true];
+    setObjective('Story complete — free roam Sunset Bay!');
+    setDialog("Marla: 'That is the whole story, kid. The bank job paid off — Sunset Bay is yours now.'", 999);
+    // Stand on the avenue by the hideout, looking west down the road so
+    // the street, the hideout and the city open up behind the player.
+    W.playerPos = { x: -120, z: 160 };
+    W.playerYaw = -Math.PI / 2;
+    W.camYaw = -Math.PI / 2;
+    W.player.position.set(W.playerPos.x, 0, W.playerPos.z);
+    W.player.visible = true;
+    dressStreet(scene, rng, CFG.hideout.x, CFG.hideout.z);
+    showScreen(null);
   }
 
-  if (name === 'end') {
-    S.screen = 'over';
-    S.overReason = 'wasted';
-    S.player.health = 0;
-    S.player.money = 650;
-    const cop = S.vehicles.spawnCar('police', 6, 30, Math.PI, { driver: 'npc' });
-    cop.speed = 0;
-    for (let i = 0; i < 2 / STEP; i += 1) {
-      S.time += STEP;
-      S.city.update(STEP, S.time);
-      S.traffic.update(STEP);
-    }
-    S.hud.setScreen('over', { reason: 'wasted', money: S.player.money, best: Math.max(S.best, S.player.money) });
-    return { screen: 'over' };
-  }
-
-  // 'play' (and anything else): driving to the first pickup, mission live.
-  // The route stays on the roads: north up Bay Street, then west to the marina.
-  const car = S.vehicles.spawnCar('civil', 0, 80, Math.PI, { driver: 'player' });
-  S.playerCtl.enterCar(car);
-  S.player.money = 150;
-  const route = [{ x: 0, z: -60 }, { x: LANDMARKS.parcelPickup.x, z: LANDMARKS.parcelPickup.z }];
-  for (let i = 0; i < PLAY_SECONDS / STEP; i += 1) {
-    driveRoute(S, car, route, STEP);
-    stepWorld(S, STEP);
-    syncPlayerToCar(S);
-  }
-  S.hud.setScreen('play');
-  S.hud.setObjective('M1 Parcel Run — pick up the parcel at Bay Street');
-  S.hud.showDialog('Marla: "Pick up the parcel at the marina end of Bay Street."', 10);
-  return { screen: 'play' };
+  // Let the simulation settle for a couple of seconds, then declare ready.
+  W.shotFrames = 0;
+  const tick = () => {
+    W.shotFrames += 1;
+    if (W.shotFrames >= 110) window.__shotReady = true;
+    else requestAnimationFrame(tick);
+  };
+  requestAnimationFrame(tick);
 }
